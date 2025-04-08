@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
 # %% Define file paths and chunk size
-file_name = r"C:\Users\cadas\Box\ECSTATIC - General\02 datasets (public)\STanford EArthquake Dataset (STEAD)\chunk2.hdf5"
-csv_file = r"C:\Users\cadas\Box\ECSTATIC - General\02 datasets (public)\STanford EArthquake Dataset (STEAD)\chunk2.csv"
+file_name = r"C:\Users\cadas\Box\ECSTATIC - General\02 datasets (public)\STanford EArthquake Dataset (STEAD)\chunk1.hdf5"
+csv_file = r"C:\Users\cadas\Box\ECSTATIC - General\02 datasets (public)\STanford EArthquake Dataset (STEAD)\chunk1.csv"
 chunksize = 10000
 nrows=10000
 plotting = False
@@ -49,7 +49,7 @@ for chunk in chunks:
         max_amplitudes_e.append(max_e)
         max_amplitudes_n.append(max_n)
         max_amplitudes_z.append(max_z)
-        source_magnitudes.append(dataset.attrs['source_magnitude'])
+        #source_magnitudes.append(dataset.attrs['source_magnitude'])
 
         if(plotting):
             # %% Plot waveforms of the current event
@@ -65,7 +65,7 @@ for chunk in chunks:
             ax1.legend(loc='upper right', prop={'weight': 'bold'})
             ax1.set_xticklabels([])  # Hide x-axis tick labels
             ax1.set_ylabel('Amplitude counts', fontsize=12)
-            print(f"E Channel - max: {max_e} | min: {np.min(data[:, 0])} | magnitude: {dataset.attrs['source_magnitude']}")
+            # print(f"E Channel - max: {max_e} | min: {np.min(data[:, 0])} | magnitude: {dataset.attrs['source_magnitude']}")
 
             # Subplot 2: N channel
             ax2 = fig.add_subplot(412)
@@ -77,7 +77,7 @@ for chunk in chunks:
             ax2.legend(loc='upper right', prop={'weight': 'bold'})
             ax2.set_xticklabels([])
             ax2.set_ylabel('Amplitude counts', fontsize=12)
-            print(f"N Channel - max: {max_n} | min: {np.min(data[:, 1])} | magnitude: {dataset.attrs['source_magnitude']}")
+            # print(f"N Channel - max: {max_n} | min: {np.min(data[:, 1])} | magnitude: {dataset.attrs['source_magnitude']}")
 
             # Subplot 3: Z channel
             ax3 = fig.add_subplot(413)
@@ -89,7 +89,7 @@ for chunk in chunks:
             ax3.legend(loc='upper right', prop={'weight': 'bold'})
             ax3.set_xticklabels([])
             ax3.set_ylabel('Amplitude counts', fontsize=12)
-            print(f"Z Channel - max: {max_z} | min: {np.min(data[:, 2])} | magnitude: {dataset.attrs['source_magnitude']}")
+            # print(f"Z Channel - max: {max_z} | min: {np.min(data[:, 2])} | magnitude: {dataset.attrs['source_magnitude']}")
 
             # Subplot 4: Combined channels (E in blue, N in green, Z in red)
             ax4 = fig.add_subplot(414)
@@ -114,7 +114,8 @@ for chunk in chunks:
     dtfl.close()
 
 # %% Convert the lists to NumPy arrays for easier manipulation.
-source_magnitudes = np.array(source_magnitudes, dtype=float)
+#source_magnitudes = np.array(source_magnitudes, dtype=float)
+source_magnitudes = np.linspace(0, 0, num=len(max_amplitudes_e))
 max_amplitudes_e = np.array(max_amplitudes_e, dtype=float)
 max_amplitudes_n = np.array(max_amplitudes_n, dtype=float)
 max_amplitudes_z = np.array(max_amplitudes_z, dtype=float)
