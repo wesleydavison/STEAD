@@ -20,8 +20,27 @@ csv_file_eq = r"/users/230442014/archive/STEAD_dataset/chunk2.csv"
 file_name_noise = r"/users/230442014/archive/STEAD_dataset/chunk1.hdf5"
 csv_file_noise = r"/users/230442014/archive/STEAD_dataset/chunk1.csv"
 
-chunksize = 10000
-nrows = 10000
+# Processing mode
+MODE = 'prod'  # 'test' or 'prod'
+if MODE == 'test':
+    chunksize = 1000  # Smaller chunk size for testing
+    nrows = 1000     # Limit number of rows for testing
+    # Test mode filters
+    EQ_FILTERS = {
+        'trace_category': 'earthquake_local',
+        'source_distance_km': 20,  # <= 20 km
+        'source_magnitude': (1, 3)  # between 1 and 3
+    }
+else:  # prod mode
+    chunksize = 100000  # Larger chunk size for production
+    nrows = None       # No row limit
+    # Production mode filters (minimal or none)
+    EQ_FILTERS = {
+        'trace_category': 'earthquake_local',
+        'source_distance_km': None,  # No distance limit
+        'source_magnitude': None     # No magnitude limit
+    }
+
 plotting = True     # Toggle all plotting on/off
 quiet = False    # If True, skip waveform+PSD plots
 plot_aggregated_only = True  # If True, only plot aggregated PSD, skip individual waveform plots
@@ -50,7 +69,7 @@ all_eq_traces = []  # Store trace names and info for earthquakes
 all_eq_info = []  # Store magnitude and distance info
 
 def create_aggregated_psd():
-    """Create and save an aggregated PSD plot from all collected PSD data"""
+    """Create and save aggregated PSD plots in both log-log and linear scales"""
     if len(all_noise_psd_e) > 0 and len(all_eq_psd_e) > 0:
         # Convert lists to arrays
         all_noise_psd_e_array = np.array(all_noise_psd_e)
@@ -72,94 +91,120 @@ def create_aggregated_psd():
         mean_eq_psd_n = np.mean(all_eq_psd_n_array, axis=0)
         mean_eq_psd_z = np.mean(all_eq_psd_z_array, axis=0)
         
-        # Create the plot
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8), dpi=150)
+        # Create two figures - one for log-log and one for linear scales
+        fig_log, (ax1_log, ax2_log) = plt.subplots(1, 2, figsize=(20, 8), dpi=150)
+        fig_lin, (ax1_lin, ax2_lin) = plt.subplots(1, 2, figsize=(20, 8), dpi=150)
         
-        # Plot noise PSDs
-        ax1.plot(freqs_noise, mean_noise_psd_e, label='E component', color='C0')
-        ax1.plot(freqs_noise, mean_noise_psd_n, label='N component', color='C1')
-        ax1.plot(freqs_noise, mean_noise_psd_z, label='Z component', color='C2')
-        
-        # Add shaded regions for noise standard deviation
-        std_noise_psd_e = np.std(all_noise_psd_e_array, axis=0)
-        std_noise_psd_n = np.std(all_noise_psd_n_array, axis=0)
-        std_noise_psd_z = np.std(all_noise_psd_z_array, axis=0)
-        
-        ax1.fill_between(freqs_noise, mean_noise_psd_e - std_noise_psd_e, mean_noise_psd_e + std_noise_psd_e, 
-                        color='C0', alpha=0.2)
-        ax1.fill_between(freqs_noise, mean_noise_psd_n - std_noise_psd_n, mean_noise_psd_n + std_noise_psd_n, 
-                        color='C1', alpha=0.2)
-        ax1.fill_between(freqs_noise, mean_noise_psd_z - std_noise_psd_z, mean_noise_psd_z + std_noise_psd_z, 
-                        color='C2', alpha=0.2)
-        
-        # Plot earthquake PSDs
-        ax2.plot(freqs_eq, mean_eq_psd_e, label='E component', color='C0')
-        ax2.plot(freqs_eq, mean_eq_psd_n, label='N component', color='C1')
-        ax2.plot(freqs_eq, mean_eq_psd_z, label='Z component', color='C2')
-        
-        # Add shaded regions for earthquake standard deviation
-        std_eq_psd_e = np.std(all_eq_psd_e_array, axis=0)
-        std_eq_psd_n = np.std(all_eq_psd_n_array, axis=0)
-        std_eq_psd_z = np.std(all_eq_psd_z_array, axis=0)
-        
-        ax2.fill_between(freqs_eq, mean_eq_psd_e - std_eq_psd_e, mean_eq_psd_e + std_eq_psd_e, 
-                        color='C0', alpha=0.2)
-        ax2.fill_between(freqs_eq, mean_eq_psd_n - std_eq_psd_n, mean_eq_psd_n + std_eq_psd_n, 
-                        color='C1', alpha=0.2)
-        ax2.fill_between(freqs_eq, mean_eq_psd_z - std_eq_psd_z, mean_eq_psd_z + std_eq_psd_z, 
-                        color='C2', alpha=0.2)
-        
-        # Set plot properties
-        for ax, title, traces, info in zip(
-            [ax1, ax2], 
-            ['Noise', 'Earthquake'],
-            [all_noise_traces, all_eq_traces],
-            [None, all_eq_info]
-        ):
-            ax.set_xlabel('Frequency (Hz)')
-            ax.set_ylabel('PSD (counts²/Hz)')
-            
-            # Create detailed title
-            if title == 'Noise':
-                title_text = f'Aggregated PSD - {title}\nTraces: {", ".join(traces[:3])}...'
+        # Function to plot PSDs with given axes
+        def plot_psds(ax1, ax2, is_log=False):
+            # Plot noise PSDs
+            if is_log:
+                ax1.loglog(freqs_noise, mean_noise_psd_e, label='E component', color='C0')
+                ax1.loglog(freqs_noise, mean_noise_psd_n, label='N component', color='C1')
+                ax1.loglog(freqs_noise, mean_noise_psd_z, label='Z component', color='C2')
+                ax2.loglog(freqs_eq, mean_eq_psd_e, label='E component', color='C0')
+                ax2.loglog(freqs_eq, mean_eq_psd_n, label='N component', color='C1')
+                ax2.loglog(freqs_eq, mean_eq_psd_z, label='Z component', color='C2')
             else:
-                # For earthquakes, include magnitude and distance info
-                mag_dist_info = "\n".join([f"M{info['magnitude']:.1f} @ {info['distance']:.1f}km" 
-                                         for info in info[:3]])
-                title_text = f'Aggregated PSD - {title}\nTraces: {", ".join(traces[:3])}...\n{mag_dist_info}'
+                ax1.plot(freqs_noise, mean_noise_psd_e, label='E component', color='C0')
+                ax1.plot(freqs_noise, mean_noise_psd_n, label='N component', color='C1')
+                ax1.plot(freqs_noise, mean_noise_psd_z, label='Z component', color='C2')
+                ax2.plot(freqs_eq, mean_eq_psd_e, label='E component', color='C0')
+                ax2.plot(freqs_eq, mean_eq_psd_n, label='N component', color='C1')
+                ax2.plot(freqs_eq, mean_eq_psd_z, label='Z component', color='C2')
             
-            ax.set_title(title_text)
-            #ax.set_yscale('log')  # Use logarithmic scale for better visualization
-            ax.grid(True, which='both', ls='--', lw=0.5)
-            ax.legend()
+            # Add shaded regions for standard deviation
+            std_noise_psd_e = np.std(all_noise_psd_e_array, axis=0)
+            std_noise_psd_n = np.std(all_noise_psd_n_array, axis=0)
+            std_noise_psd_z = np.std(all_noise_psd_z_array, axis=0)
+            std_eq_psd_e = np.std(all_eq_psd_e_array, axis=0)
+            std_eq_psd_n = np.std(all_eq_psd_n_array, axis=0)
+            std_eq_psd_z = np.std(all_eq_psd_z_array, axis=0)
+            
+            # Plot shaded regions
+            for ax, mean_psds, std_psds, freqs, title, traces, info in zip(
+                [ax1, ax2],
+                [[mean_noise_psd_e, mean_noise_psd_n, mean_noise_psd_z],
+                 [mean_eq_psd_e, mean_eq_psd_n, mean_eq_psd_z]],
+                [[std_noise_psd_e, std_noise_psd_n, std_noise_psd_z],
+                 [std_eq_psd_e, std_eq_psd_n, std_eq_psd_z]],
+                [freqs_noise, freqs_eq],
+                ['Noise', 'Earthquake'],
+                [all_noise_traces, all_eq_traces],
+                [None, all_eq_info]
+            ):
+                # Plot mean and std for each component
+                for i, (mean, std) in enumerate(zip(mean_psds, std_psds)):
+                    ax.fill_between(freqs, mean - std, mean + std, 
+                                  color=f'C{i}', alpha=0.2)
+                
+                # Set plot properties
+                ax.set_xlabel('Frequency (Hz)')
+                ax.set_ylabel('PSD (counts²/Hz)')
+                
+                # Create detailed title
+                if title == 'Noise':
+                    title_text = f'Aggregated PSD - {title}\nTraces: {", ".join(traces[:3])}...'
+                else:
+                    mag_dist_info = "\n".join([f"M{info['magnitude']:.1f} @ {info['distance']:.1f}km" 
+                                             for info in info[:3]])
+                    title_text = f'Aggregated PSD - {title}\nTraces: {", ".join(traces[:3])}...\n{mag_dist_info}'
+                
+                ax.set_title(title_text)
+                ax.grid(True, which='both', ls='--', lw=0.5)
+                ax.legend()
         
+        # Create both plots
+        plot_psds(ax1_log, ax2_log, is_log=True)
+        plot_psds(ax1_lin, ax2_lin, is_log=False)
+        
+        # Save both figures
+        plt.figure(fig_log.number)
         plt.tight_layout()
-        plt.savefig(os.path.join(figs_dir, 'aggregated_psd_comparison.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Created aggregated PSD comparison plot with {len(all_noise_psd_e)} noise records and {len(all_eq_psd_e)} earthquake records")
+        plt.savefig(os.path.join(figs_dir, 'aggregated_psd_comparison_loglog.png'), dpi=300, bbox_inches='tight')
+        plt.close(fig_log)
+        
+        plt.figure(fig_lin.number)
+        plt.tight_layout()
+        plt.savefig(os.path.join(figs_dir, 'aggregated_psd_comparison_linear.png'), dpi=300, bbox_inches='tight')
+        plt.close(fig_lin)
+        
+        print(f"Created aggregated PSD comparison plots with {len(all_noise_psd_e)} noise records and {len(all_eq_psd_e)} earthquake records")
 
 # %% Loop over CSV in chunks
 chunks_eq = pd.read_csv(csv_file_eq, chunksize=chunksize, nrows=nrows)
 chunks_noise = pd.read_csv(csv_file_noise, chunksize=chunksize, nrows=nrows)
 
 # Calculate total number of chunks
-total_chunks = min(nrows // chunksize + (1 if nrows % chunksize else 0), 
-                  len(list(pd.read_csv(csv_file_eq, chunksize=chunksize, nrows=nrows))))
+if MODE == 'test':
+    total_chunks = min(nrows // chunksize + (1 if nrows % chunksize else 0), 
+                      len(list(pd.read_csv(csv_file_eq, chunksize=chunksize, nrows=nrows))))
+else:
+    # For production, estimate total chunks from file size
+    import os
+    file_size = os.path.getsize(csv_file_eq)
+    estimated_rows = file_size / 1000  # Rough estimate: 1KB per row
+    total_chunks = (estimated_rows + chunksize - 1) // chunksize
 
 # Create progress bar for chunks
-with tqdm(total=total_chunks, desc="Processing chunks") as pbar:
+with tqdm(total=total_chunks, desc=f"Processing chunks ({MODE} mode)") as pbar:
     for chunk_eq, chunk_noise in zip(chunks_eq, chunks_noise):
-        # Filter earthquake data
-        chunk_eq = chunk_eq[
-            (chunk_eq.trace_category == 'earthquake_local') &
-            (chunk_eq.source_distance_km <= 20) &
-            (chunk_eq.source_magnitude > 1) &
-            (chunk_eq.source_magnitude < 3)
-        ]
+        # Filter earthquake data based on mode
+        if MODE == 'test':
+            chunk_eq = chunk_eq[
+                (chunk_eq.trace_category == EQ_FILTERS['trace_category']) &
+                (chunk_eq.source_distance_km <= EQ_FILTERS['source_distance_km']) &
+                (chunk_eq.source_magnitude > EQ_FILTERS['source_magnitude'][0]) &
+                (chunk_eq.source_magnitude < EQ_FILTERS['source_magnitude'][1])
+            ]
+        else:
+            chunk_eq = chunk_eq[chunk_eq.trace_category == EQ_FILTERS['trace_category']]
         
-        # Filter noise data to match earthquake data size
-        chunk_noise = chunk_noise[chunk_noise.trace_category == 'noise']
-        chunk_noise = chunk_noise.sample(n=len(chunk_eq), random_state=42)
+        # Get all noise data for aggregated PSD
+        all_noise_data = chunk_noise[chunk_noise.trace_category == 'noise']
+        
+        # Sample noise data to match earthquake data size for individual comparisons
+        chunk_noise = all_noise_data.sample(n=len(chunk_eq), random_state=42) if not chunk_eq.empty else all_noise_data
         
         if chunk_eq.empty:
             print("No events found in this chunk")
@@ -168,13 +213,44 @@ with tqdm(total=total_chunks, desc="Processing chunks") as pbar:
 
         ev_list_eq = chunk_eq['trace_name'].tolist()
         ev_list_noise = chunk_noise['trace_name'].tolist()
+        all_noise_list = all_noise_data['trace_name'].tolist()
 
         # Process both earthquake and noise data
         with h5py.File(file_name_eq, 'r') as dtfl_eq, h5py.File(file_name_noise, 'r') as dtfl_noise:
-            # Create progress bar for records in this chunk
+            # First process all noise data for aggregated PSD
+            for trace_name_noise in tqdm(all_noise_list, 
+                                       desc="Processing all noise data",
+                                       leave=False):
+                ds_noise = dtfl_noise.get(f"data/{trace_name_noise}")
+                
+                if ds_noise is None:
+                    continue
+
+                # Process noise data
+                data_noise = np.array(ds_noise)
+                fs_noise = float(ds_noise.attrs.get('sampling_rate', 100.0))
+                n_noise = data_noise.shape[0]
+                
+                # Compute PSDs for noise
+                nperseg_noise = min(int(fs_noise*4), n_noise)
+                noverlap_noise = nperseg_noise // 2
+                
+                # Noise PSDs
+                f_noise, Pxx_e_noise = welch(data_noise[:, 0], fs=fs_noise, nperseg=nperseg_noise, noverlap=noverlap_noise)
+                _, Pxx_n_noise = welch(data_noise[:, 1], fs=fs_noise, nperseg=nperseg_noise, noverlap=noverlap_noise)
+                _, Pxx_z_noise = welch(data_noise[:, 2], fs=fs_noise, nperseg=nperseg_noise, noverlap=noverlap_noise)
+
+                # Store PSDs for aggregation
+                all_noise_psd_e.append(Pxx_e_noise)
+                all_noise_psd_n.append(Pxx_n_noise)
+                all_noise_psd_z.append(Pxx_z_noise)
+                all_noise_freqs.append(f_noise)
+                all_noise_traces.append(trace_name_noise)
+
+            # Then process earthquake and sampled noise data for comparison
             for trace_name_eq, trace_name_noise in tqdm(zip(ev_list_eq, ev_list_noise), 
                                                       total=len(ev_list_eq),
-                                                      desc="Processing records",
+                                                      desc="Processing comparison data",
                                                       leave=False):
                 ds_eq = dtfl_eq.get(f"data/{trace_name_eq}")
                 ds_noise = dtfl_noise.get(f"data/{trace_name_noise}")
@@ -213,18 +289,7 @@ with tqdm(total=total_chunks, desc="Processing chunks") as pbar:
                 _, Pxx_n_eq = welch(data_eq[:, 1], fs=fs_eq, nperseg=nperseg_eq, noverlap=noverlap_eq)
                 _, Pxx_z_eq = welch(data_eq[:, 2], fs=fs_eq, nperseg=nperseg_eq, noverlap=noverlap_eq)
                 
-                # Noise PSDs
-                f_noise, Pxx_e_noise = welch(data_noise[:, 0], fs=fs_noise, nperseg=nperseg_noise, noverlap=noverlap_noise)
-                _, Pxx_n_noise = welch(data_noise[:, 1], fs=fs_noise, nperseg=nperseg_noise, noverlap=noverlap_noise)
-                _, Pxx_z_noise = welch(data_noise[:, 2], fs=fs_noise, nperseg=nperseg_noise, noverlap=noverlap_noise)
-
-                # Store PSDs for aggregation
-                all_noise_psd_e.append(Pxx_e_noise)
-                all_noise_psd_n.append(Pxx_n_noise)
-                all_noise_psd_z.append(Pxx_z_noise)
-                all_noise_freqs.append(f_noise)
-                all_noise_traces.append(trace_name_noise)
-                
+                # Store earthquake PSDs for aggregation
                 all_eq_psd_e.append(Pxx_e_eq)
                 all_eq_psd_n.append(Pxx_n_eq)
                 all_eq_psd_z.append(Pxx_z_eq)
@@ -234,9 +299,6 @@ with tqdm(total=total_chunks, desc="Processing chunks") as pbar:
                     'magnitude': chunk_eq[chunk_eq['trace_name'] == trace_name_eq]['source_magnitude'].iloc[0],
                     'distance': chunk_eq[chunk_eq['trace_name'] == trace_name_eq]['source_distance_km'].iloc[0]
                 })
-
-                psd_data_eq.append((f_eq, Pxx_e_eq, Pxx_n_eq, Pxx_z_eq))
-                psd_data_noise.append((f_noise, Pxx_e_noise, Pxx_n_noise, Pxx_z_noise))
 
                 if quiet or plot_aggregated_only:
                     continue
