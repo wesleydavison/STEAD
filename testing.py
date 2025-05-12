@@ -4,11 +4,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import welch
 import matplotlib.ticker as ticker
+import os
+
+# Create figs directory if it doesn't exist
+figs_dir = "figs"
+if not os.path.exists(figs_dir):
+    os.makedirs(figs_dir)
 
 # %% File paths and parameters
 
-file_name = r"C:\Users\cadas\Box\ECSTATIC - General\02 datasets (public)\STanford EArthquake Dataset (STEAD)\chunk2.hdf5"
-csv_file  = r"C:\Users\cadas\Box\ECSTATIC - General\02 datasets (public)\STanford EArthquake Dataset (STEAD)\chunk2.csv"
+
+file_name = r"/users/230442014/archive/STEAD_dataset/chunk2.hdf5"
+csv_file  = r"/users/230442014/archive/STEAD_dataset/chunk2.csv"
 
 chunksize = 10000
 nrows      = 10000
@@ -110,7 +117,17 @@ for chunk in pd.read_csv(csv_file, chunksize=chunksize, nrows=nrows):
                 ax5.grid(True, which='both', ls='--', lw=0.5)
 
                 plt.tight_layout()
-                plt.show()
+                
+                # Save the figure
+                fig_path = os.path.join(figs_dir, f'waveform_{trace_name}.png')
+                plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+                plt.close(fig)  # Close the figure to free memory
+                
+                # Ask for continue
+                user_input = input("Press Enter to continue to next waveform (or 'q' to quit): ")
+                if user_input.lower() == 'q':
+                    print("Exiting program...")
+                    exit()
 
 # %% Convert amplitude lists to arrays for further stats
 max_amp_e = np.array(max_amp_e)
