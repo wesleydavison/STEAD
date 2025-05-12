@@ -99,11 +99,11 @@ for chunk in pd.read_csv(csv_file, chunksize=chunksize, nrows=nrows):
                 ax4.legend()
                 ax4.grid(True)
 
-                # PSD (log–log)
+                # PSD (linear)
                 ax5 = axes[4]
-                ax5.loglog(f_e, Pxx_e, label='E')
-                ax5.loglog(f_n, Pxx_n, label='N')
-                ax5.loglog(f_z, Pxx_z, label='Z')
+                ax5.plot(f_e, Pxx_e, label='E')
+                ax5.plot(f_n, Pxx_n, label='N')
+                ax5.plot(f_z, Pxx_z, label='Z')
                 ax5.set_xlabel('Frequency (Hz)')
                 ax5.set_ylabel('PSD (counts²/Hz)')
                 ax5.legend()
