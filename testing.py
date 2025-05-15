@@ -1,3 +1,4 @@
+# %%
 import pandas as pd
 import h5py
 import numpy as np
@@ -20,8 +21,9 @@ csv_file_eq = r"/users/230442014/archive/STEAD_dataset/chunk2.csv"
 file_name_noise = r"/users/230442014/archive/STEAD_dataset/chunk1.hdf5"
 csv_file_noise = r"/users/230442014/archive/STEAD_dataset/chunk1.csv"
 
+# %%
 # Processing mode
-MODE = 'prod'  # 'test' or 'prod'
+MODE = 'test'  # 'test' or 'prod'
 if MODE == 'test':
     chunksize = 1000  # Smaller chunk size for testing
     nrows = 1000     # Limit number of rows for testing
@@ -41,6 +43,7 @@ else:  # prod mode
         'source_magnitude': None     # No magnitude limit
     }
 
+# %% Plotting
 plotting = True     # Toggle all plotting on/off
 quiet = False    # If True, skip waveform+PSD plots
 plot_aggregated_only = True  # If True, only plot aggregated PSD, skip individual waveform plots
@@ -68,6 +71,7 @@ all_eq_freqs = []
 all_eq_traces = []  # Store trace names and info for earthquakes
 all_eq_info = []  # Store magnitude and distance info
 
+# %%
 def create_aggregated_psd():
     """Create and save aggregated PSD plots in both log-log and linear scales"""
     if len(all_noise_psd_e) > 0 and len(all_eq_psd_e) > 0:
@@ -408,3 +412,5 @@ max_amp_z_noise = np.array(max_amp_z_noise)
 create_aggregated_psd()
 
 # Now max_amp_* and psd_data are ready for your downstream analysis.
+
+# %%
