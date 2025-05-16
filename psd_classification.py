@@ -5,6 +5,9 @@
 
 import time
 from datetime import datetime
+import PyEMD
+
+print(PyEMD.__version__)
 
 def print_timestamp(message):
     """Print message with current timestamp"""
@@ -26,6 +29,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error, precision_score, accuracy_score, f1_score
+from PyEMD import EMD
+from scipy.stats import pearsonr
 
 # %%
 # =============================================================================
@@ -52,7 +57,7 @@ class SeismicDataProcessor:
         # Configure chunking based on mode
         if mode == 'test':
             self.chunksize = 10000
-            self.nrows = 200
+            self.nrows = 2
         else:
             self.chunksize = None
             self.nrows = None
@@ -78,7 +83,7 @@ class SeismicDataProcessor:
             chunks_eq = [pd.read_csv(self.csv_file_eq, usecols=needed_columns, dtype=dtype_dict)]
             chunks_noise = [pd.read_csv(self.csv_file_noise, usecols=needed_columns, dtype=dtype_dict)]
             total_chunks = 1
-            
+        
         return chunks_eq, chunks_noise, total_chunks
     
     def _filter_data(self, chunk_eq, chunk_noise):
@@ -207,9 +212,203 @@ class PSDFeatureExtractor:
         
         return np.array(all_features), np.array(all_labels), np.array(all_targets)
 
+class EMDFeatureExtractor:
+    """Class for extracting features using Empirical Mode Decomposition"""
+    
+    def __init__(self, n_imfs=None):
+        """Initialize the EMD feature extractor"""
+        self.n_imfs = n_imfs
+        self.emd = EMD()
+    
+    def _calculate_imf_energy(self, imfs):
+        """Calculate energy distribution across IMFs"""
+        energies = np.array([np.sum(imf**2) for imf in imfs])
+        total_energy = np.sum(energies)
+        return energies / total_energy  # Normalized energy distribution
+    
+    def _calculate_imf_frequency(self, imf, fs):
+        """Calculate dominant frequency of an IMF using Welch's method"""
+        f, Pxx = welch(imf, fs=fs, nperseg=min(256, len(imf)))
+        return f[np.argmax(Pxx)]  # Return frequency with maximum power
+    
+    def _calculate_reconstruction_error(self, original, imfs):
+        """Calculate reconstruction error"""
+        reconstructed = np.sum(imfs, axis=0)
+        return np.mean((original - reconstructed)**2)
+    
+    def extract_features(self, data, fs):
+        """Extract EMD features from seismic data"""
+        features = []
+        
+        # Process each component (E, N, Z)
+        for comp_idx in range(3):
+            # Get IMFs for this component
+            imfs = self.emd(data[:, comp_idx])
+            
+            # Limit number of IMFs if specified
+            if self.n_imfs is not None:
+                imfs = imfs[:self.n_imfs]
+            
+            # Calculate features for this component
+            # 1. Energy distribution
+            energy_dist = self._calculate_imf_energy(imfs)
+            features.extend(energy_dist)
+            
+            # 2. Dominant frequencies
+            freqs = [self._calculate_imf_frequency(imf, fs) for imf in imfs]
+            features.extend(freqs)
+            
+            # 3. Reconstruction error
+            error = self._calculate_reconstruction_error(data[:, comp_idx], imfs)
+            features.append(error)
+        
+        return np.array(features)
+    
+    def process_data(self, eq_data, noise_data):
+        """Process all data and extract EMD features"""
+        all_features = []
+        all_labels = []
+        all_targets = []
+        
+        # Process earthquake data
+        for trace_name, (data, fs, mag) in eq_data.items():
+            features = self.extract_features(data, fs)
+            all_features.append(features)
+            all_labels.append(1)  # 1 for earthquake
+            all_targets.append(mag)
+        
+        # Process noise data
+        for trace_name, (data, fs) in noise_data.items():
+            features = self.extract_features(data, fs)
+            all_features.append(features)
+            all_labels.append(0)  # 0 for noise
+            all_targets.append(0)
+        
+        return np.array(all_features), np.array(all_labels), np.array(all_targets)
+
 # %%
 # =============================================================================
-# 4. Classification and Regression Module
+# 4. Visualization Module
+# =============================================================================
+
+class FeatureVisualizer:
+    """Class for visualizing seismic features"""
+    
+    def __init__(self, save_dir="figs"):
+        """Initialize the visualizer"""
+        self.save_dir = save_dir
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+    
+    def plot_psd_features(self, data, fs, features, freq_bins, title="PSD Features"):
+        """Plot PSD features for a single trace"""
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig.suptitle(title)
+        
+        # Plot original signals
+        t = np.arange(len(data)) / fs
+        components = ['East', 'North', 'Vertical']
+        for i, (ax, comp) in enumerate(zip(axes[0], components)):
+            ax.plot(t, data[:, i], 'k', lw=0.5)
+            ax.set_title(f'{comp} Component')
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Amplitude')
+            ax.grid(True)
+        
+        # Plot PSD features
+        n_bins = len(freq_bins)
+        for i, (ax, comp) in enumerate(zip(axes[1], components)):
+            start_idx = i * n_bins
+            end_idx = (i + 1) * n_bins
+            ax.semilogx(freq_bins, features[start_idx:end_idx], 'b-')
+            ax.set_title(f'{comp} PSD')
+            ax.set_xlabel('Frequency (Hz)')
+            ax.set_ylabel('log10(PSD)')
+            ax.grid(True)
+        
+        plt.tight_layout()
+        return fig
+    
+    def plot_emd_features(self, data, fs, imfs, features, n_imfs, title="EMD Features"):
+        """Plot EMD features for a single trace"""
+        n_imfs_to_plot = min(n_imfs, max(imf.shape[0] for imf in imfs))
+        n_features_per_comp = n_imfs_to_plot * 2 + 1  # energies + frequencies + error
+        
+        fig = plt.figure(figsize=(15, 4*(n_imfs_to_plot + 2)))
+        gs = fig.add_gridspec(n_imfs_to_plot + 2, 3)
+        fig.suptitle(title)
+        
+        # Plot original signal and IMFs
+        t = np.arange(len(data)) / fs
+        components = ['East', 'North', 'Vertical']
+        
+        for comp_idx, comp in enumerate(components):
+            # Original signal
+            ax = fig.add_subplot(gs[0, comp_idx])
+            ax.plot(t, data[:, comp_idx], 'k', lw=0.5)
+            ax.set_title(f'{comp} Component')
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Amplitude')
+            ax.grid(True)
+            
+            # IMFs
+            for i in range(n_imfs_to_plot):
+                if i < imfs[comp_idx].shape[0]:
+                    ax = fig.add_subplot(gs[i+1, comp_idx])
+                    ax.plot(t, imfs[comp_idx][i], 'b', lw=0.5)
+                    ax.set_title(f'IMF {i+1}')
+                    ax.set_xlabel('Time (s)')
+                    ax.set_ylabel('Amplitude')
+                    ax.grid(True)
+        
+        # Plot feature distributions
+        ax_energy = fig.add_subplot(gs[-1, 0])
+        ax_freq = fig.add_subplot(gs[-1, 1])
+        ax_error = fig.add_subplot(gs[-1, 2])
+        
+        # Energy distribution
+        for comp_idx, comp in enumerate(components):
+            start_idx = comp_idx * n_features_per_comp
+            energies = features[start_idx:start_idx + n_imfs_to_plot]
+            ax_energy.plot(range(1, n_imfs_to_plot + 1), energies, 'o-', label=comp)
+        ax_energy.set_title('Energy Distribution')
+        ax_energy.set_xlabel('IMF Index')
+        ax_energy.set_ylabel('Normalized Energy')
+        ax_energy.legend()
+        ax_energy.grid(True)
+        
+        # Dominant frequencies
+        for comp_idx, comp in enumerate(components):
+            start_idx = comp_idx * n_features_per_comp + n_imfs_to_plot
+            freqs = features[start_idx:start_idx + n_imfs_to_plot]
+            ax_freq.semilogy(range(1, n_imfs_to_plot + 1), freqs, 'o-', label=comp)
+        ax_freq.set_title('Dominant Frequencies')
+        ax_freq.set_xlabel('IMF Index')
+        ax_freq.set_ylabel('Frequency (Hz)')
+        ax_freq.legend()
+        ax_freq.grid(True)
+        
+        # Reconstruction errors
+        errors = [features[comp_idx * n_features_per_comp + 2*n_imfs_to_plot] 
+                 for comp_idx in range(3)]
+        ax_error.bar(components, errors)
+        ax_error.set_title('Reconstruction Error')
+        ax_error.set_ylabel('MSE')
+        ax_error.grid(True)
+        
+        plt.tight_layout()
+        return fig
+    
+    def save_figure(self, fig, filename):
+        """Save figure to file"""
+        save_path = os.path.join(self.save_dir, filename)
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved figure to {save_path}")
+
+# %%
+# =============================================================================
+# 5. Classification and Regression Module
 # =============================================================================
 
 class SeismicClassifier:
@@ -328,7 +527,7 @@ class SeismicRegressor:
 
 # %%
 # =============================================================================
-# 5. Main Execution
+# 6. Main Execution
 # =============================================================================
 
 if __name__ == "__main__":
@@ -353,20 +552,76 @@ if __name__ == "__main__":
     )
     eq_data, noise_data = processor.load_data()
     
-    # Extract PSD features
-    extractor = PSDFeatureExtractor()
-    features, labels, targets = extractor.process_data(eq_data, noise_data)
+    # Initialize feature extractors and visualizer
+    psd_extractor = PSDFeatureExtractor()
+    emd_extractor = EMDFeatureExtractor(n_imfs=5)
+    visualizer = FeatureVisualizer()
     
-    # Classification
-    classifier = SeismicClassifier()
-    precision, accuracy, f1 = classifier.train(features, labels)
-    print(f"Classification results: Precision={precision:.3f}, Accuracy={accuracy:.3f}, F1={f1:.3f}")
+    # Visualize features for one earthquake and one noise trace
+    print("\nVisualizing features...")
     
-    # Regression (only on earthquake data)
-    earthquake_mask = labels == 1
-    regressor = SeismicRegressor()
-    r2, mae = regressor.train(features[earthquake_mask], targets[earthquake_mask])
-    print(f"Regression results: R²={r2:.3f}, MAE={mae:.3f}")
+    # Get first earthquake and noise trace
+    eq_trace = next(iter(eq_data.items()))
+    noise_trace = next(iter(noise_data.items()))
+    
+    # PSD visualization
+    eq_trace_data, eq_fs, _ = eq_trace[1]
+    eq_features, eq_freq_bins = psd_extractor.extract_features(eq_trace_data, eq_fs)
+    fig_psd_eq = visualizer.plot_psd_features(
+        eq_trace_data, eq_fs, eq_features, eq_freq_bins,
+        title="PSD Features - Earthquake"
+    )
+    visualizer.save_figure(fig_psd_eq, "psd_features_earthquake.png")
+    
+    noise_trace_data, noise_fs = noise_trace[1]
+    noise_features, noise_freq_bins = psd_extractor.extract_features(noise_trace_data, noise_fs)
+    fig_psd_noise = visualizer.plot_psd_features(
+        noise_trace_data, noise_fs, noise_features, noise_freq_bins,
+        title="PSD Features - Noise"
+    )
+    visualizer.save_figure(fig_psd_noise, "psd_features_noise.png")
+    
+    # EMD visualization
+    eq_imfs = []
+    for i, comp in enumerate(['East', 'North', 'Vertical']):
+        print(f"{comp} data shape: {eq_trace_data[:, i].shape}")
+        imfs = emd_extractor.emd(eq_trace_data[:, i])
+        print(f"{comp} IMFs: {imfs.shape}")
+        eq_imfs.append(imfs[:emd_extractor.n_imfs])  # Limit to n_imfs
+
+    eq_features = emd_extractor.extract_features(eq_trace_data, eq_fs)
+    fig_emd_eq = visualizer.plot_emd_features(
+        eq_trace_data, eq_fs, eq_imfs, eq_features, emd_extractor.n_imfs,
+        title="EMD Features - Earthquake"
+    )
+    visualizer.save_figure(fig_emd_eq, "emd_features_earthquake.png")
+    
+    noise_imfs = [emd_extractor.emd(noise_trace_data[:, i])[:emd_extractor.n_imfs] for i in range(3)]
+    noise_features = emd_extractor.extract_features(noise_trace_data, noise_fs)
+    fig_emd_noise = visualizer.plot_emd_features(
+        noise_trace_data, noise_fs, noise_imfs, noise_features, emd_extractor.n_imfs,
+        title="EMD Features - Noise"
+    )
+    visualizer.save_figure(fig_emd_noise, "emd_features_noise.png")
+    
+    # Extract features for all data
+    print("\nExtracting PSD features...")
+    psd_features, psd_labels, psd_targets = psd_extractor.process_data(eq_data, noise_data)
+    
+    print("\nExtracting EMD features...")
+    emd_features, emd_labels, emd_targets = emd_extractor.process_data(eq_data, noise_data)
+    
+    # Classification with PSD features
+    print("\nTraining classifier with PSD features...")
+    psd_classifier = SeismicClassifier()
+    psd_precision, psd_accuracy, psd_f1 = psd_classifier.train(psd_features, psd_labels)
+    print(f"PSD Classification results: Precision={psd_precision:.3f}, Accuracy={psd_accuracy:.3f}, F1={psd_f1:.3f}")
+    
+    # Classification with EMD features
+    print("\nTraining classifier with EMD features...")
+    emd_classifier = SeismicClassifier()
+    emd_precision, emd_accuracy, emd_f1 = emd_classifier.train(emd_features, emd_labels)
+    print(f"EMD Classification results: Precision={emd_precision:.3f}, Accuracy={emd_accuracy:.3f}, F1={emd_f1:.3f}")
 
 
 
