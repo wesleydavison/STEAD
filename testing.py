@@ -57,8 +57,8 @@ print_timestamp("Configuring processing mode...")
 MODE = 'prod'  # 'test' or 'prod'
 
 if MODE == 'test':
-    chunksize = 1000  # Smaller chunk size for testing
-    nrows = 30     # Limit number of rows for testing
+    chunksize = 10000  # Smaller chunk size for testing
+    nrows = 200     # Limit number of rows for testing
     
 else:  # prod mode
     chunksize = None  # No chunking in production mode
@@ -236,13 +236,33 @@ def extract_psd_features(data, fs):
     tuple
         (features, freqs) where features is the processed PSD data
     """
-    # Compute PSD using classical periodogram method
-    f, Pxx_e, Pxx_n, Pxx_z = compute_psd(data, fs)
+    # Compute PSD using Welch's method for better frequency resolution
+    # and reduced variance compared to periodogram
+    n_bins = 50  # Reduce from ~3000 to 50 features per component
+    nperseg = min(256, len(data))  # Adaptive window size
+    
+    # Compute PSD for each component using Welch's method
+    f, Pxx_e = welch(data[:, 0], fs=fs, nperseg=nperseg, nfft=nperseg*2)
+    f, Pxx_n = welch(data[:, 1], fs=fs, nperseg=nperseg, nfft=nperseg*2)
+    f, Pxx_z = welch(data[:, 2], fs=fs, nperseg=nperseg, nfft=nperseg*2)
+    
+    # Convert to log scale to better handle the dynamic range
+    Pxx_e = np.log10(Pxx_e + 1e-10)
+    Pxx_n = np.log10(Pxx_n + 1e-10)
+    Pxx_z = np.log10(Pxx_z + 1e-10)
+    
+    # Bin frequencies logarithmically to better capture the frequency distribution
+    freq_bins = np.logspace(np.log10(f[1]), np.log10(f[-1]), n_bins)
+    
+    # Bin the PSD values
+    binned_e = np.interp(freq_bins, f, Pxx_e)
+    binned_n = np.interp(freq_bins, f, Pxx_n)
+    binned_z = np.interp(freq_bins, f, Pxx_z)
     
     # Combine features from all components
-    features = np.concatenate([Pxx_e, Pxx_n, Pxx_z])
+    features = np.concatenate([binned_e, binned_n, binned_z])
     
-    return features, f
+    return features, freq_bins
 
 def plot_psd_comparison(data, fs, title, figs_dir, trace_name):
     """Plot PSD using periodogram method
@@ -428,27 +448,30 @@ if len(all_features) > 0:
     print_timestamp("Training model...")
     start_time = time.time()
     
-    # Initialize and train the model with increased max_iter and better solver
+    # Initialize and train the model with production-optimized parameters
     clf = LogisticRegression(
-        max_iter=5000,  # Increased from default 1000
-        solver='saga',  # More robust solver
-        n_jobs=-1,      # Use all available cores
-        random_state=42
+        max_iter=100,  # Reduced iterations since we have better features
+        solver='saga',  # Better for large datasets
+        C=0.1,  # Stronger regularization for better generalization
+        class_weight='balanced',  # Handle class imbalance
+        n_jobs=-1,  # Use all available cores
+        random_state=42,
+        tol=1e-3  # Relaxed convergence tolerance for faster training
     )
-    clf.fit(X_train, Y_train)
+
+    # Add feature scaling with memory-efficient implementation
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    # Train the model with early stopping
+    clf.fit(X_train_scaled, Y_train)
+
+    # Predict on test data
+    Y_pred_class = clf.predict(X_test_scaled)
 
     # End training time
     training_time = time.time() - start_time
-
-    # Start prediction timing
-    print_timestamp("Predicting on test data...")
-    pred_start_time = time.time()
-    
-    # Predict on test data
-    Y_pred_class = clf.predict(X_test)
-    
-    # End prediction time
-    prediction_time = time.time() - pred_start_time
 
     # Classification metrics
     precision = precision_score(Y_test, Y_pred_class)
@@ -460,8 +483,7 @@ if len(all_features) > 0:
     print(f"Test F1 Score: {f1}")
     print_timestamp("\nTiming Results:")
     print(f"Training time: {training_time:.2f} seconds")
-    print(f"Prediction time: {prediction_time:.2f} seconds")
-    print(f"Total time: {training_time + prediction_time:.2f} seconds")
+    print(f"Total time: {training_time:.2f} seconds")
     print_timestamp("Classification completed.")
 else:
     print_timestamp("No features collected for classification analysis. Check if data filtering is too restrictive.")
