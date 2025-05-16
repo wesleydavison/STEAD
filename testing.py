@@ -2,7 +2,14 @@
 # =============================================================================
 # 1. Import Libraries
 # =============================================================================
-print("Importing libraries...")
+import time
+from datetime import datetime
+
+def print_timestamp(message):
+    """Print message with current timestamp"""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+
+print_timestamp("Importing libraries...")
 import pandas as pd
 import h5py
 import numpy as np
@@ -23,7 +30,7 @@ from sklearn.metrics import r2_score, mean_absolute_error, precision_score, accu
 # =============================================================================
 # 2. Directory Setup
 # =============================================================================
-print("Setting up directories...")
+print_timestamp("Setting up directories...")
 # Create figs directory if it doesn't exist
 figs_dir = "figs"
 if not os.path.exists(figs_dir):
@@ -33,7 +40,7 @@ if not os.path.exists(figs_dir):
 # =============================================================================
 # 3. File Paths and Parameters
 # =============================================================================
-print("Setting up file paths and parameters...")
+print_timestamp("Setting up file paths and parameters...")
 # File paths
 file_name_eq = r"/users/230442014/archive/STEAD_dataset/chunk2.hdf5"
 csv_file_eq = r"/users/230442014/archive/STEAD_dataset/chunk2.csv"
@@ -45,47 +52,46 @@ csv_file_noise = r"/users/230442014/archive/STEAD_dataset/chunk1.csv"
 # =============================================================================
 # 4. Processing Mode Configuration
 # =============================================================================
-print("Configuring processing mode...")
+print_timestamp("Configuring processing mode...")
 # Processing mode
-MODE = 'test'  # 'test' or 'prod'
+MODE = 'prod'  # 'test' or 'prod'
+
 if MODE == 'test':
-    chunksize = 100000  # Smaller chunk size for testing
-    nrows = 100000     # Limit number of rows for testing
+    chunksize = 1000  # Smaller chunk size for testing
+    nrows = 30     # Limit number of rows for testing
     
 else:  # prod mode
-    chunksize = 200000  # Larger chunk size for production
-    nrows = None       # No row limit
+    chunksize = None  # No chunking in production mode
+    nrows = None     # No row limit
     # Production mode filters (minimal or none)  
 
 # %%
 # =============================================================================
 # 5. Data Loading and Chunking
 # =============================================================================
-print("Loading and chunking data...")
+print_timestamp("Loading data...")
 # Initialize data readers
-chunks_eq = pd.read_csv(csv_file_eq, chunksize=chunksize, nrows=nrows)
-chunks_noise = pd.read_csv(csv_file_noise, chunksize=chunksize, nrows=nrows)
-
-# Calculate total number of chunks
 if MODE == 'test':
+    chunks_eq = pd.read_csv(csv_file_eq, chunksize=chunksize, nrows=nrows)
+    chunks_noise = pd.read_csv(csv_file_noise, chunksize=chunksize, nrows=nrows)
     total_chunks = min(nrows // chunksize + (1 if nrows % chunksize else 0), 
                       len(list(pd.read_csv(csv_file_eq, chunksize=chunksize, nrows=nrows))))
 else:
-    # For production, estimate total chunks from file size
-    import os
-    file_size = os.path.getsize(csv_file_eq)
-    estimated_rows = file_size / 1000  # Rough estimate: 1KB per row
-    total_chunks = (estimated_rows + chunksize - 1) // chunksize
+    # Load entire datasets in production mode
+    print("Loading full datasets...")
+    chunks_eq = [pd.read_csv(csv_file_eq)]
+    chunks_noise = [pd.read_csv(csv_file_noise)]
+    total_chunks = 1
 
 # %%
 # =============================================================================
 # 6. Data Filtering Configuration
 # =============================================================================
-print("Setting up data filtering...")
+print_timestamp("Setting up data filtering...")
 EQ_FILTERS = {
-        'trace_category': 'earthquake_local',
-        'source_distance_km': 3,  # <= 20 km
-        'source_magnitude': (1, 3)  # between 1 and 3
+        'trace_category': 'earthquake_local' #,
+        #'source_distance_km': 20,  # <= 20 km
+        #'source_magnitude': (0, 3)  # between 1 and 3
     }
 
 # EQ_FILTERS = {
@@ -98,7 +104,7 @@ EQ_FILTERS = {
 # =============================================================================
 # 7. Plotting Configuration
 # =============================================================================
-print("Configuring plotting settings...")
+print_timestamp("Configuring plotting settings...")
 # Plotting parameters
 plotting = True     # Toggle all plotting on/off
 quiet = True    # If True, skip waveform+PSD plots
@@ -108,7 +114,7 @@ plot_aggregated_only = True  # If True, only plot aggregated PSD, skip individua
 # =============================================================================
 # 8. Data Storage Initialization
 # =============================================================================
-print("Initializing data storage...")
+print_timestamp("Initializing data storage...")
 # Initialize storage variables
 max_amp_e_eq = []
 max_amp_n_eq = []
@@ -119,18 +125,7 @@ max_amp_z_noise = []
 psd_data_eq = []  # [(f, Pxx_e, Pxx_n, Pxx_z), ...]
 psd_data_noise = []  # [(f, Pxx_e, Pxx_n, Pxx_z), ...]
 
-# Store all PSDs for aggregation
-all_noise_psd_e = []
-all_noise_psd_n = []
-all_noise_psd_z = []
-all_noise_freqs = []
-all_noise_traces = []  # Store trace names for noise
-all_eq_psd_e = []
-all_eq_psd_n = []
-all_eq_psd_z = []
-all_eq_freqs = []
-all_eq_traces = []  # Store trace names and info for earthquakes
-all_eq_info = []  # Store magnitude and distance info
+
 
 # Dictionary to store noise PSDs for reuse
 noise_psd_cache = {}  # {trace_name: (f, Pxx_e, Pxx_n, Pxx_z)}
@@ -139,134 +134,7 @@ noise_psd_cache = {}  # {trace_name: (f, Pxx_e, Pxx_n, Pxx_z)}
 # =============================================================================
 # 9. Data Processing Functions
 # =============================================================================
-print("Setting up data processing functions...")
-def create_aggregated_psd(
-    all_noise_psd_e, all_noise_psd_n, all_noise_psd_z,
-    all_eq_psd_e, all_eq_psd_n, all_eq_psd_z,
-    all_noise_freqs, all_eq_freqs,
-    all_noise_traces, all_eq_traces,
-    all_eq_info,
-    figs_dir
-):
-    """Create and save aggregated PSD plots in both log-log and linear scales
-    
-    Parameters:
-    -----------
-    all_noise_psd_e, all_noise_psd_n, all_noise_psd_z : list
-        Lists of PSD arrays for noise data (E, N, Z components)
-    all_eq_psd_e, all_eq_psd_n, all_eq_psd_z : list
-        Lists of PSD arrays for earthquake data (E, N, Z components)
-    all_noise_freqs, all_eq_freqs : list
-        Lists of frequency arrays for noise and earthquake data
-    all_noise_traces, all_eq_traces : list
-        Lists of trace names for noise and earthquake data
-    all_eq_info : list
-        List of dictionaries containing magnitude and distance info for earthquakes
-    figs_dir : str
-        Directory path to save the figures
-    """
-    print("Creating aggregated PSD plots...")
-    if len(all_noise_psd_e) > 0 and len(all_eq_psd_e) > 0:
-        # Convert lists to arrays
-        all_noise_psd_e_array = np.array(all_noise_psd_e)
-        all_noise_psd_n_array = np.array(all_noise_psd_n)
-        all_noise_psd_z_array = np.array(all_noise_psd_z)
-        all_eq_psd_e_array = np.array(all_eq_psd_e)
-        all_eq_psd_n_array = np.array(all_eq_psd_n)
-        all_eq_psd_z_array = np.array(all_eq_psd_z)
-        
-        # Use the frequency arrays (they should all be the same within each dataset)
-        freqs_noise = all_noise_freqs[0]
-        freqs_eq = all_eq_freqs[0]
-        
-        # Calculate mean PSDs
-        mean_noise_psd_e = np.mean(all_noise_psd_e_array, axis=0)
-        mean_noise_psd_n = np.mean(all_noise_psd_n_array, axis=0)
-        mean_noise_psd_z = np.mean(all_noise_psd_z_array, axis=0)
-        mean_eq_psd_e = np.mean(all_eq_psd_e_array, axis=0)
-        mean_eq_psd_n = np.mean(all_eq_psd_n_array, axis=0)
-        mean_eq_psd_z = np.mean(all_eq_psd_z_array, axis=0)
-        
-        # Create two figures - one for log-log and one for linear scales
-        fig_log, (ax1_log, ax2_log) = plt.subplots(1, 2, figsize=(20, 8), dpi=150)
-        fig_lin, (ax1_lin, ax2_lin) = plt.subplots(1, 2, figsize=(20, 8), dpi=150)
-        
-        # Function to plot PSDs with given axes
-        def plot_psds(ax1, ax2, is_log=False):
-            # Plot noise PSDs
-            if is_log:
-                ax1.loglog(freqs_noise, mean_noise_psd_e, label='E component', color='C0')
-                ax1.loglog(freqs_noise, mean_noise_psd_n, label='N component', color='C1')
-                ax1.loglog(freqs_noise, mean_noise_psd_z, label='Z component', color='C2')
-                ax2.loglog(freqs_eq, mean_eq_psd_e, label='E component', color='C0')
-                ax2.loglog(freqs_eq, mean_eq_psd_n, label='N component', color='C1')
-                ax2.loglog(freqs_eq, mean_eq_psd_z, label='Z component', color='C2')
-            else:
-                ax1.plot(freqs_noise, mean_noise_psd_e, label='E component', color='C0')
-                ax1.plot(freqs_noise, mean_noise_psd_n, label='N component', color='C1')
-                ax1.plot(freqs_noise, mean_noise_psd_z, label='Z component', color='C2')
-                ax2.plot(freqs_eq, mean_eq_psd_e, label='E component', color='C0')
-                ax2.plot(freqs_eq, mean_eq_psd_n, label='N component', color='C1')
-                ax2.plot(freqs_eq, mean_eq_psd_z, label='Z component', color='C2')
-            
-            # Add shaded regions for standard deviation
-            std_noise_psd_e = np.std(all_noise_psd_e_array, axis=0)
-            std_noise_psd_n = np.std(all_noise_psd_n_array, axis=0)
-            std_noise_psd_z = np.std(all_noise_psd_z_array, axis=0)
-            std_eq_psd_e = np.std(all_eq_psd_e_array, axis=0)
-            std_eq_psd_n = np.std(all_eq_psd_n_array, axis=0)
-            std_eq_psd_z = np.std(all_eq_psd_z_array, axis=0)
-            
-            # Plot shaded regions
-            for ax, mean_psds, std_psds, freqs, title, traces, info in zip(
-                [ax1, ax2],
-                [[mean_noise_psd_e, mean_noise_psd_n, mean_noise_psd_z],
-                 [mean_eq_psd_e, mean_eq_psd_n, mean_eq_psd_z]],
-                [[std_noise_psd_e, std_noise_psd_n, std_noise_psd_z],
-                 [std_eq_psd_e, std_eq_psd_n, std_eq_psd_z]],
-                [freqs_noise, freqs_eq],
-                ['Noise', 'Earthquake'],
-                [all_noise_traces, all_eq_traces],
-                [None, all_eq_info]
-            ):
-                # Plot mean and std for each component
-                for i, (mean, std) in enumerate(zip(mean_psds, std_psds)):
-                    ax.fill_between(freqs, mean - std, mean + std, 
-                                  color=f'C{i}', alpha=0.2)
-                
-                # Set plot properties
-                ax.set_xlabel('Frequency (Hz)')
-                ax.set_ylabel('PSD (counts²/Hz)')
-                
-                # Create detailed title
-                if title == 'Noise':
-                    title_text = f'Aggregated PSD - {title}\nTraces: {", ".join(traces[:3])}...'
-                else:
-                    mag_dist_info = "\n".join([f"M{info['magnitude']:.1f} @ {info['distance']:.1f}km" 
-                                             for info in info[:3]])
-                    title_text = f'Aggregated PSD - {title}\nTraces: {", ".join(traces[:3])}...\n{mag_dist_info}'
-                
-                ax.set_title(title_text)
-                ax.grid(True, which='both', ls='--', lw=0.5)
-                ax.legend()
-        
-        # Create both plots
-        plot_psds(ax1_log, ax2_log, is_log=True)
-        plot_psds(ax1_lin, ax2_lin, is_log=False)
-        
-        # Save both figures
-        plt.figure(fig_log.number)
-        plt.tight_layout()
-        plt.savefig(os.path.join(figs_dir, 'aggregated_psd_comparison_loglog.png'), dpi=300, bbox_inches='tight')
-        plt.close(fig_log)
-        
-        plt.figure(fig_lin.number)
-        plt.tight_layout()
-        plt.savefig(os.path.join(figs_dir, 'aggregated_psd_comparison_linear.png'), dpi=300, bbox_inches='tight')
-        plt.close(fig_lin)
-        
-        print(f"Created aggregated PSD comparison plots with {len(all_noise_psd_e)} noise records and {len(all_eq_psd_e)} earthquake records")
-
+print_timestamp("Setting up data processing functions...")
 def filter_data(chunk_eq, chunk_noise, mode='test', eq_filters=None):
     """Filter earthquake and noise data based on specified criteria
     
@@ -291,15 +159,23 @@ def filter_data(chunk_eq, chunk_noise, mode='test', eq_filters=None):
     print(f"Total noise records in chunk: {len(chunk_noise)}")
     
     if mode == 'test':
-        filtered_eq = chunk_eq[
-            (chunk_eq.trace_category == eq_filters['trace_category']) &
-            (chunk_eq.source_distance_km <= eq_filters['source_distance_km']) &
-            (chunk_eq.source_magnitude > eq_filters['source_magnitude'][0]) &
-            (chunk_eq.source_magnitude < eq_filters['source_magnitude'][1])
-        ]
+        # Start with the base filter for trace category
+        filtered_eq = chunk_eq[chunk_eq.trace_category == eq_filters['trace_category']]
+        
+        # Apply additional filters if they exist
+        if 'source_distance_km' in eq_filters and eq_filters['source_distance_km'] is not None:
+            filtered_eq = filtered_eq[filtered_eq.source_distance_km <= eq_filters['source_distance_km']]
+            print(f"Distance range: 0-{eq_filters['source_distance_km']} km")
+            
+        if 'source_magnitude' in eq_filters and eq_filters['source_magnitude'] is not None:
+            mag_min, mag_max = eq_filters['source_magnitude']
+            filtered_eq = filtered_eq[
+                (filtered_eq.source_magnitude > mag_min) & 
+                (filtered_eq.source_magnitude < mag_max)
+            ]
+            print(f"Magnitude range: {mag_min}-{mag_max}")
+            
         print(f"Filtered earthquake records: {len(filtered_eq)}")
-        print(f"Distance range: 0-{eq_filters['source_distance_km']} km")
-        print(f"Magnitude range: {eq_filters['source_magnitude'][0]}-{eq_filters['source_magnitude'][1]}")
     else:
         filtered_eq = chunk_eq[chunk_eq.trace_category == eq_filters['trace_category']]
     
@@ -345,8 +221,8 @@ def compute_psd(data, fs):
     
     return f, Pxx_e, Pxx_n, Pxx_z
 
-def process_psd_for_lda(data, fs):
-    """Process seismic data through PSD and prepare for LDA
+def extract_psd_features(data, fs):
+    """Extract PSD features from seismic data for machine learning
     
     Parameters:
     -----------
@@ -388,7 +264,7 @@ def plot_psd_comparison(data, fs, title, figs_dir, trace_name):
     f, Pxx_e, Pxx_n, Pxx_z = compute_psd(data, fs)
     
     # Process PSD for LDA
-    features, _ = process_psd_for_lda(data, fs)
+    features, _ = extract_psd_features(data, fs)
     
     # Create figure with 2 subplots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
@@ -427,46 +303,13 @@ def plot_psd_comparison(data, fs, title, figs_dir, trace_name):
     print(f"Frequency points: {len(f)}, Resolution: {f[1]-f[0]:.2f} Hz")
     print(f"Feature vector length for LDA: {len(features)}")
 
-# %%
-# =============================================================================
-# 10. LDA Implementation
-# =============================================================================
-print("Setting up LDA processing...")
-def apply_lda(features_list, labels, n_components=1):
-    """Apply LDA to the features
-    
-    Parameters:
-    -----------
-    features_list : list
-        List of feature vectors
-    labels : numpy.ndarray
-        Array of labels (0 for noise, 1 for earthquake)
-    n_components : int
-        Number of components to keep in LDA
-        
-    Returns:
-    --------
-    tuple
-        (lda, transformed_features)
-    """
-    # Convert list to array
-    X = np.array(features_list)
-    
-    # Standardize features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Apply LDA
-    lda = LinearDiscriminantAnalysis(n_components=n_components)
-    X_lda = lda.fit_transform(X_scaled, labels)
-    
-    return lda, X_lda
+
 
 # %%
 # =============================================================================
 # 11. Main Processing Loop
 # =============================================================================
-print("Starting main processing loop...")
+print_timestamp("Starting main processing loop...")
 # Initialize lists for features, labels, trace names, and regression targets
 all_features = []
 all_labels = []
@@ -504,7 +347,7 @@ with tqdm(total=total_chunks, desc=f"Processing chunks ({MODE} mode)") as pbar:
                 fs_eq = float(ds_eq.attrs.get('sampling_rate', 100.0))
                 
                 # Process PSD for regression
-                features, _ = process_psd_for_lda(data_eq, fs_eq)
+                features, _ = extract_psd_features(data_eq, fs_eq)
                 all_features.append(features)
                 all_labels.append(1)  # 1 for earthquake
                 all_trace_names.append(trace_name_eq)
@@ -514,16 +357,7 @@ with tqdm(total=total_chunks, desc=f"Processing chunks ({MODE} mode)") as pbar:
                 
                 # Store PSD data for aggregated plots
                 f, Pxx_e, Pxx_n, Pxx_z = compute_psd(data_eq, fs_eq)
-                all_eq_psd_e.append(Pxx_e)
-                all_eq_psd_n.append(Pxx_n)
-                all_eq_psd_z.append(Pxx_z)
-                all_eq_freqs.append(f)
-                all_eq_traces.append(trace_name_eq)
-                all_eq_info.append({
-                    'magnitude': mag,
-                    'distance': filtered_eq[filtered_eq.trace_name == trace_name_eq].source_distance_km.iloc[0]
-                })
-                
+         
                 # Plot PSD comparison
                 if not quiet:
                     plot_psd_comparison(data_eq, fs_eq, 
@@ -543,7 +377,7 @@ with tqdm(total=total_chunks, desc=f"Processing chunks ({MODE} mode)") as pbar:
                 fs_noise = float(ds_noise.attrs.get('sampling_rate', 100.0))
                 
                 # Process PSD for regression
-                features, _ = process_psd_for_lda(data_noise, fs_noise)
+                features, _ = extract_psd_features(data_noise, fs_noise)
                 all_features.append(features)
                 all_labels.append(0)  # 0 for noise
                 all_trace_names.append(trace_name_noise)
@@ -552,11 +386,7 @@ with tqdm(total=total_chunks, desc=f"Processing chunks ({MODE} mode)") as pbar:
                 
                 # Store PSD data for aggregated plots
                 f, Pxx_e, Pxx_n, Pxx_z = compute_psd(data_noise, fs_noise)
-                all_noise_psd_e.append(Pxx_e)
-                all_noise_psd_n.append(Pxx_n)
-                all_noise_psd_z.append(Pxx_z)
-                all_noise_freqs.append(f)
-                all_noise_traces.append(trace_name_noise)
+
                 
                 # Plot PSD comparison
                 if not quiet:
@@ -573,44 +403,68 @@ print(f"- {len(all_labels) - sum(all_labels)} noise features")
 
 # Classification on PSD features using logistic regression with train/test split
 if len(all_features) > 0:
+    print_timestamp("Starting classification...")
     X = np.array(all_features)
     Y = np.array(all_targets)
 
     # Binary class labels: 1 for earthquake, 0 for noise
     Y_class = (Y > 0).astype(int)
 
+    # Print data dimensions
+    print_timestamp("\nData dimensions:")
+    print(f"Number of samples: {X.shape[0]}")
+    print(f"Number of features: {X.shape[1]}")
+    print(f"Class distribution: {np.bincount(Y_class)}")
+
     # Split into train and test sets (70% train, 30% test)
+    print_timestamp("Splitting into train and test sets...")
     X_train, X_test, Y_train, Y_test = train_test_split(
         X, Y_class, test_size=0.3, random_state=42, stratify=Y_class
     )
 
     from sklearn.linear_model import LogisticRegression
-    clf = LogisticRegression(max_iter=1000)
+
+    # Start timing
+    print_timestamp("Training model...")
+    start_time = time.time()
+    
+    # Initialize and train the model with increased max_iter and better solver
+    clf = LogisticRegression(
+        max_iter=5000,  # Increased from default 1000
+        solver='saga',  # More robust solver
+        n_jobs=-1,      # Use all available cores
+        random_state=42
+    )
     clf.fit(X_train, Y_train)
 
+    # End training time
+    training_time = time.time() - start_time
+
+    # Start prediction timing
+    print_timestamp("Predicting on test data...")
+    pred_start_time = time.time()
+    
     # Predict on test data
     Y_pred_class = clf.predict(X_test)
+    
+    # End prediction time
+    prediction_time = time.time() - pred_start_time
 
     # Classification metrics
     precision = precision_score(Y_test, Y_pred_class)
     accuracy = accuracy_score(Y_test, Y_pred_class)
     f1 = f1_score(Y_test, Y_pred_class)
-    print("\nLogistic Regression Classification Results (Test Set):")
-    print("Test Precision:", precision)
-    print("Test Accuracy:", accuracy)
-    print("Test F1 Score:", f1)
+    print_timestamp("\nLogistic Regression Classification Results (Test Set):")
+    print(f"Test Precision: {precision}")
+    print(f"Test Accuracy: {accuracy}")
+    print(f"Test F1 Score: {f1}")
+    print_timestamp("\nTiming Results:")
+    print(f"Training time: {training_time:.2f} seconds")
+    print(f"Prediction time: {prediction_time:.2f} seconds")
+    print(f"Total time: {training_time + prediction_time:.2f} seconds")
+    print_timestamp("Classification completed.")
 else:
-    print("\nNo features collected for classification analysis. Check if data filtering is too restrictive.")
-
-# Create final aggregated PSD plot with all collected data
-create_aggregated_psd(
-    all_noise_psd_e, all_noise_psd_n, all_noise_psd_z,
-    all_eq_psd_e, all_eq_psd_n, all_eq_psd_z,
-    all_noise_freqs, all_eq_freqs,
-    all_noise_traces, all_eq_traces,
-    all_eq_info,
-    figs_dir
-)
+    print_timestamp("No features collected for classification analysis. Check if data filtering is too restrictive.")
 
 
 
