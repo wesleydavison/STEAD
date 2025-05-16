@@ -2,6 +2,7 @@
 # =============================================================================
 # 1. Import Libraries
 # =============================================================================
+
 import time
 from datetime import datetime
 
@@ -70,17 +71,28 @@ else:  # prod mode
 # 5. Data Loading and Chunking
 # =============================================================================
 print_timestamp("Loading data...")
+# Define needed columns and their data types for optimization
+needed_columns = ['trace_name', 'trace_category', 'source_magnitude', 'source_distance_km']
+dtype_dict = {
+    'trace_name': 'category',  # Use category for string columns
+    'trace_category': 'category',
+    'source_magnitude': 'float32',  # Use float32 instead of float64
+    'source_distance_km': 'float32'
+}
+
 # Initialize data readers
 if MODE == 'test':
-    chunks_eq = pd.read_csv(csv_file_eq, chunksize=chunksize, nrows=nrows)
-    chunks_noise = pd.read_csv(csv_file_noise, chunksize=chunksize, nrows=nrows)
+    chunks_eq = pd.read_csv(csv_file_eq, chunksize=chunksize, nrows=nrows, 
+                           usecols=needed_columns, dtype=dtype_dict)
+    chunks_noise = pd.read_csv(csv_file_noise, chunksize=chunksize, nrows=nrows, 
+                              usecols=needed_columns, dtype=dtype_dict)
     total_chunks = min(nrows // chunksize + (1 if nrows % chunksize else 0), 
                       len(list(pd.read_csv(csv_file_eq, chunksize=chunksize, nrows=nrows))))
 else:
     # Load entire datasets in production mode
     print("Loading full datasets...")
-    chunks_eq = [pd.read_csv(csv_file_eq)]
-    chunks_noise = [pd.read_csv(csv_file_noise)]
+    chunks_eq = [pd.read_csv(csv_file_eq, usecols=needed_columns, dtype=dtype_dict)]
+    chunks_noise = [pd.read_csv(csv_file_noise, usecols=needed_columns, dtype=dtype_dict)]
     total_chunks = 1
 
 # %%
