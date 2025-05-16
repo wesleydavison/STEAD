@@ -2,3 +2,6 @@
 *.png
 *.pdf
 *pyc
+*.err
+*.log
+*.out
