@@ -29,7 +29,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error, precision_score, accuracy_score, f1_score
-from PyEMD import EMD
+from PyEMD import EMD, EEMD
 from scipy.stats import pearsonr
 
 # %%
@@ -56,8 +56,8 @@ class SeismicDataProcessor:
         
         # Configure chunking based on mode
         if mode == 'test':
-            self.chunksize = 10000
-            self.nrows = 2
+            self.chunksize = 12000
+            self.nrows = 48000
         else:
             self.chunksize = None
             self.nrows = None
@@ -219,6 +219,23 @@ class EMDFeatureExtractor:
         """Initialize the EMD feature extractor"""
         self.n_imfs = n_imfs
         self.emd = EMD()
+        self.emd.MAX_ITERATION = 500  # Limit sifting iterations to prevent hanging
+        self.max_imfs = 10  # Maximum number of IMFs to consider
+        self.timeout = 30  # Timeout in seconds for EMD decomposition
+    
+    def _check_imf_quality(self, imf, original):
+        """Check if an IMF meets quality criteria"""
+        # Check if IMF has enough extrema
+        extrema_count = len(np.where(np.diff(np.sign(np.diff(imf))))[0])
+        if extrema_count < 2:
+            return False
+            
+        # Check if IMF is not too similar to original signal
+        correlation = np.abs(np.corrcoef(imf, original)[0,1])
+        if correlation > 0.95:  # If IMF is too similar to original
+            return False
+            
+        return True
     
     def _calculate_imf_energy(self, imfs):
         """Calculate energy distribution across IMFs"""
@@ -236,31 +253,94 @@ class EMDFeatureExtractor:
         reconstructed = np.sum(imfs, axis=0)
         return np.mean((original - reconstructed)**2)
     
+    def _safe_emd_decomposition(self, signal_data):
+        """Perform EMD decomposition with timeout"""
+        import signal as sig
+        
+        def timeout_handler(signum, frame):
+            raise TimeoutError("EMD decomposition timed out")
+        
+        # Set timeout handler
+        sig.signal(sig.SIGALRM, timeout_handler)
+        sig.alarm(self.timeout)
+        
+        try:
+            # Convert signal to numpy array if it isn't already
+            signal_data = np.asarray(signal_data)
+            
+            # Perform EMD decomposition
+            imfs = self.emd.emd(signal_data)
+            
+            # Convert to numpy array if it isn't already
+            if not isinstance(imfs, np.ndarray):
+                imfs = np.array(imfs)
+            
+            sig.alarm(0)  # Disable alarm
+            return imfs
+        except TimeoutError:
+            print_timestamp("    Warning: EMD decomposition timed out")
+            return None
+        except Exception as e:
+            print_timestamp(f"    Warning: EMD decomposition failed: {str(e)}")
+            return None
+        finally:
+            sig.alarm(0)  # Ensure alarm is disabled
+    
     def extract_features(self, data, fs):
         """Extract EMD features from seismic data"""
         features = []
         
         # Process each component (E, N, Z)
         for comp_idx in range(3):
-            # Get IMFs for this component
-            imfs = self.emd(data[:, comp_idx])
+            signal = data[:, comp_idx]
             
-            # Limit number of IMFs if specified
-            if self.n_imfs is not None:
-                imfs = imfs[:self.n_imfs]
-            
-            # Calculate features for this component
-            # 1. Energy distribution
-            energy_dist = self._calculate_imf_energy(imfs)
-            features.extend(energy_dist)
-            
-            # 2. Dominant frequencies
-            freqs = [self._calculate_imf_frequency(imf, fs) for imf in imfs]
-            features.extend(freqs)
-            
-            # 3. Reconstruction error
-            error = self._calculate_reconstruction_error(data[:, comp_idx], imfs)
-            features.append(error)
+            try:
+                # Perform EMD decomposition with timeout
+                imfs = self._safe_emd_decomposition(signal)
+                
+                if imfs is None:
+                    print_timestamp(f"    Warning: EMD decomposition failed for component {comp_idx}")
+                    # Use zeros for features if decomposition fails
+                    if self.n_imfs is not None:
+                        features.extend([0] * (self.n_imfs * 2 + 1))
+                    continue
+                
+                # Filter IMFs based on quality
+                valid_imfs = []
+                for imf in imfs:
+                    if self._check_imf_quality(imf, signal):
+                        valid_imfs.append(imf)
+                    if len(valid_imfs) >= self.max_imfs:
+                        break
+                
+                if not valid_imfs:
+                    print_timestamp(f"    Warning: No valid IMFs found for component {comp_idx}")
+                    if self.n_imfs is not None:
+                        features.extend([0] * (self.n_imfs * 2 + 1))
+                    continue
+                
+                # Limit number of IMFs if specified
+                if self.n_imfs is not None:
+                    valid_imfs = valid_imfs[:self.n_imfs]
+                
+                # Calculate features for this component
+                # 1. Energy distribution
+                energy_dist = self._calculate_imf_energy(valid_imfs)
+                features.extend(energy_dist)
+                
+                # 2. Dominant frequencies
+                freqs = [self._calculate_imf_frequency(imf, fs) for imf in valid_imfs]
+                features.extend(freqs)
+                
+                # 3. Reconstruction error
+                error = self._calculate_reconstruction_error(signal, valid_imfs)
+                features.append(error)
+                
+            except Exception as e:
+                print_timestamp(f"    Error in EMD decomposition for component {comp_idx}: {str(e)}")
+                # Use zeros for features if decomposition fails
+                if self.n_imfs is not None:
+                    features.extend([0] * (self.n_imfs * 2 + 1))
         
         return np.array(features)
     
@@ -271,14 +351,16 @@ class EMDFeatureExtractor:
         all_targets = []
         
         # Process earthquake data
-        for trace_name, (data, fs, mag) in eq_data.items():
+        for trace_name, (data, fs, mag) in tqdm(eq_data.items(), desc='EMD EQ', total=len(eq_data)):
+            print_timestamp(f"Decomposing trace: {trace_name}")
             features = self.extract_features(data, fs)
             all_features.append(features)
             all_labels.append(1)  # 1 for earthquake
             all_targets.append(mag)
         
         # Process noise data
-        for trace_name, (data, fs) in noise_data.items():
+        for trace_name, (data, fs) in tqdm(noise_data.items(), desc='EMD Noise', total=len(noise_data)):
+            print_timestamp(f"Decomposing trace: {trace_name}")
             features = self.extract_features(data, fs)
             all_features.append(features)
             all_labels.append(0)  # 0 for noise
@@ -421,7 +503,44 @@ class SeismicClassifier:
         self.scaler = StandardScaler()
         self.clf = None
         self.training_time = None
+    
+    def save_model(self, model_path, scaler_path):
+        """Save the classifier and scaler to files"""
+        import pickle
         
+        if self.clf is None:
+            raise ValueError("No trained model to save")
+            
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
+        os.makedirs(os.path.dirname(scaler_path), exist_ok=True)
+        
+        # Save classifier
+        with open(model_path, 'wb') as f:
+            pickle.dump(self.clf, f)
+            
+        # Save scaler
+        with open(scaler_path, 'wb') as f:
+            pickle.dump(self.scaler, f)
+            
+        print_timestamp(f"Model saved to {model_path}")
+        print_timestamp(f"Scaler saved to {scaler_path}")
+    
+    def load_model(self, model_path, scaler_path):
+        """Load a saved classifier and scaler"""
+        import pickle
+        
+        # Load classifier
+        with open(model_path, 'rb') as f:
+            self.clf = pickle.load(f)
+            
+        # Load scaler
+        with open(scaler_path, 'rb') as f:
+            self.scaler = pickle.load(f)
+            
+        print_timestamp(f"Model loaded from {model_path}")
+        print_timestamp(f"Scaler loaded from {scaler_path}")
+    
     def _prepare_data(self, features, labels):
         """Prepare data for training and testing"""
         X_train, X_test, Y_train, Y_test = train_test_split(
@@ -430,6 +549,10 @@ class SeismicClassifier:
             random_state=self.random_state,
             stratify=labels
         )
+
+        # Print class distribution
+        print_timestamp(f"Train set class distribution: {np.bincount(Y_train)}")
+        print_timestamp(f"Test set class distribution: {np.bincount(Y_test)}")
         
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
@@ -541,7 +664,8 @@ if __name__ == "__main__":
     MODE = 'test'
     EQ_FILTERS = {'trace_category': 'earthquake_local'}
     
-    # Load data
+    print_timestamp("Loading data...")
+    load_start = time.time()
     processor = SeismicDataProcessor(
         file_name_eq=file_name_eq,
         file_name_noise=file_name_noise,
@@ -551,15 +675,26 @@ if __name__ == "__main__":
         eq_filters=EQ_FILTERS
     )
     eq_data, noise_data = processor.load_data()
+    load_end = time.time()
+    print_timestamp(f"Data loading took {load_end - load_start:.2f} seconds.")
     
-    # Initialize feature extractors and visualizer
+    # Get current timestamp and dataset size for model filenames
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dataset_size = "all" if processor.nrows is None else f"n{processor.nrows}"
+    
+    # Model save paths
+    MODEL_DIR = "saved_models"
+    PSD_MODEL_PATH = os.path.join(MODEL_DIR, f"psd_classifier_{dataset_size}_{timestamp}.pkl")
+    PSD_SCALER_PATH = os.path.join(MODEL_DIR, f"psd_scaler_{dataset_size}_{timestamp}.pkl")
+    EMD_MODEL_PATH = os.path.join(MODEL_DIR, f"emd_classifier_{dataset_size}_{timestamp}.pkl")
+    EMD_SCALER_PATH = os.path.join(MODEL_DIR, f"emd_scaler_{dataset_size}_{timestamp}.pkl")
+    
+    print_timestamp("Initializing feature extractors and visualizer...")
     psd_extractor = PSDFeatureExtractor()
     emd_extractor = EMDFeatureExtractor(n_imfs=5)
     visualizer = FeatureVisualizer()
     
-    # Visualize features for one earthquake and one noise trace
-    print("\nVisualizing features...")
-    
+    print_timestamp("Visualizing features...")
     # Get first earthquake and noise trace
     eq_trace = next(iter(eq_data.items()))
     noise_trace = next(iter(noise_data.items()))
@@ -584,9 +719,9 @@ if __name__ == "__main__":
     # EMD visualization
     eq_imfs = []
     for i, comp in enumerate(['East', 'North', 'Vertical']):
-        print(f"{comp} data shape: {eq_trace_data[:, i].shape}")
+        print_timestamp(f"{comp} data shape: {eq_trace_data[:, i].shape}")
         imfs = emd_extractor.emd(eq_trace_data[:, i])
-        print(f"{comp} IMFs: {imfs.shape}")
+        print_timestamp(f"{comp} IMFs: {imfs.shape}")
         eq_imfs.append(imfs[:emd_extractor.n_imfs])  # Limit to n_imfs
 
     eq_features = emd_extractor.extract_features(eq_trace_data, eq_fs)
@@ -604,24 +739,49 @@ if __name__ == "__main__":
     )
     visualizer.save_figure(fig_emd_noise, "emd_features_noise.png")
     
-    # Extract features for all data
-    print("\nExtracting PSD features...")
+    print_timestamp("Extracting PSD features...")
+    psd_start = time.time()
     psd_features, psd_labels, psd_targets = psd_extractor.process_data(eq_data, noise_data)
+    psd_end = time.time()
+    print_timestamp(f"PSD feature extraction took {psd_end - psd_start:.2f} seconds.")
     
-    print("\nExtracting EMD features...")
+    # Print full dataset class distribution
+    unique, counts = np.unique(psd_labels, return_counts=True)
+    print_timestamp("Full dataset class distribution:")
+    for u, c in zip(unique, counts):
+        print_timestamp(f"  Class {u}: {c}")
+    
+    print_timestamp("Extracting EMD features...")
+    emd_start = time.time()
     emd_features, emd_labels, emd_targets = emd_extractor.process_data(eq_data, noise_data)
+    emd_end = time.time()
+    print_timestamp(f"EMD feature extraction took {emd_end - emd_start:.2f} seconds.")
     
-    # Classification with PSD features
-    print("\nTraining classifier with PSD features...")
+    print_timestamp("Training classifier with PSD features...")
+    psd_clf_start = time.time()
     psd_classifier = SeismicClassifier()
     psd_precision, psd_accuracy, psd_f1 = psd_classifier.train(psd_features, psd_labels)
-    print(f"PSD Classification results: Precision={psd_precision:.3f}, Accuracy={psd_accuracy:.3f}, F1={psd_f1:.3f}")
+    psd_clf_end = time.time()
+    print_timestamp(f"PSD Classification results: Precision={psd_precision:.3f}, Accuracy={psd_accuracy:.3f}, F1={psd_f1:.3f}")
+    print_timestamp(f"PSD Classification took {psd_clf_end - psd_clf_start:.2f} seconds.")
     
-    # Classification with EMD features
-    print("\nTraining classifier with EMD features...")
+    # Save PSD model
+    psd_classifier.save_model(PSD_MODEL_PATH, PSD_SCALER_PATH)
+    
+    print_timestamp("Training classifier with EMD features...")
+    emd_clf_start = time.time()
     emd_classifier = SeismicClassifier()
     emd_precision, emd_accuracy, emd_f1 = emd_classifier.train(emd_features, emd_labels)
-    print(f"EMD Classification results: Precision={emd_precision:.3f}, Accuracy={emd_accuracy:.3f}, F1={emd_f1:.3f}")
+    emd_clf_end = time.time()
+    print_timestamp(f"EMD Classification results: Precision={emd_precision:.3f}, Accuracy={emd_accuracy:.3f}, F1={emd_f1:.3f}")
+    print_timestamp(f"EMD Classification took {emd_clf_end - emd_clf_start:.2f} seconds.")
+    
+    # Save EMD model
+    emd_classifier.save_model(EMD_MODEL_PATH, EMD_SCALER_PATH)
+    
+    # Print total execution time
+    total_time = time.time() - load_start
+    print_timestamp(f"Total execution time: {total_time:.2f} seconds.")
 
 
 
