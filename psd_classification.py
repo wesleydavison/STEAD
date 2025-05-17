@@ -56,8 +56,8 @@ class SeismicDataProcessor:
         
         # Configure chunking based on mode
         if mode == 'test':
-            self.chunksize = 12000
-            self.nrows = 48000
+            self.chunksize = 20000
+            self.nrows = 20000
         else:
             self.chunksize = None
             self.nrows = None
@@ -287,24 +287,15 @@ class EMDFeatureExtractor:
             sig.alarm(0)  # Ensure alarm is disabled
     
     def extract_features(self, data, fs):
-        """Extract EMD features from seismic data"""
+        """Extract EMD features from seismic data. Return None if any component fails."""
         features = []
-        
-        # Process each component (E, N, Z)
         for comp_idx in range(3):
             signal = data[:, comp_idx]
-            
             try:
-                # Perform EMD decomposition with timeout
                 imfs = self._safe_emd_decomposition(signal)
-                
                 if imfs is None:
                     print_timestamp(f"    Warning: EMD decomposition failed for component {comp_idx}")
-                    # Use zeros for features if decomposition fails
-                    if self.n_imfs is not None:
-                        features.extend([0] * (self.n_imfs * 2 + 1))
-                    continue
-                
+                    return None  # Discard trace
                 # Filter IMFs based on quality
                 valid_imfs = []
                 for imf in imfs:
@@ -312,60 +303,48 @@ class EMDFeatureExtractor:
                         valid_imfs.append(imf)
                     if len(valid_imfs) >= self.max_imfs:
                         break
-                
                 if not valid_imfs:
                     print_timestamp(f"    Warning: No valid IMFs found for component {comp_idx}")
-                    if self.n_imfs is not None:
-                        features.extend([0] * (self.n_imfs * 2 + 1))
-                    continue
-                
-                # Limit number of IMFs if specified
+                    return None  # Discard trace
                 if self.n_imfs is not None:
                     valid_imfs = valid_imfs[:self.n_imfs]
-                
                 # Calculate features for this component
-                # 1. Energy distribution
                 energy_dist = self._calculate_imf_energy(valid_imfs)
                 features.extend(energy_dist)
-                
-                # 2. Dominant frequencies
                 freqs = [self._calculate_imf_frequency(imf, fs) for imf in valid_imfs]
                 features.extend(freqs)
-                
-                # 3. Reconstruction error
                 error = self._calculate_reconstruction_error(signal, valid_imfs)
                 features.append(error)
-                
             except Exception as e:
                 print_timestamp(f"    Error in EMD decomposition for component {comp_idx}: {str(e)}")
-                # Use zeros for features if decomposition fails
-                if self.n_imfs is not None:
-                    features.extend([0] * (self.n_imfs * 2 + 1))
-        
+                return None  # Discard trace
         return np.array(features)
     
     def process_data(self, eq_data, noise_data):
-        """Process all data and extract EMD features"""
+        """Process all data and extract EMD features, discarding traces with failed EMD."""
         all_features = []
         all_labels = []
         all_targets = []
-        
         # Process earthquake data
         for trace_name, (data, fs, mag) in tqdm(eq_data.items(), desc='EMD EQ', total=len(eq_data)):
             print_timestamp(f"Decomposing trace: {trace_name}")
             features = self.extract_features(data, fs)
+            if features is None:
+                print_timestamp(f"    Discarding trace {trace_name} due to EMD failure.")
+                continue
             all_features.append(features)
             all_labels.append(1)  # 1 for earthquake
             all_targets.append(mag)
-        
         # Process noise data
         for trace_name, (data, fs) in tqdm(noise_data.items(), desc='EMD Noise', total=len(noise_data)):
             print_timestamp(f"Decomposing trace: {trace_name}")
             features = self.extract_features(data, fs)
+            if features is None:
+                print_timestamp(f"    Discarding trace {trace_name} due to EMD failure.")
+                continue
             all_features.append(features)
             all_labels.append(0)  # 0 for noise
             all_targets.append(0)
-        
         return np.array(all_features), np.array(all_labels), np.array(all_targets)
 
 # %%
