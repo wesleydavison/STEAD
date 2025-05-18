@@ -6,6 +6,7 @@
 import time
 from datetime import datetime
 import PyEMD
+import argparse
 
 print(PyEMD.__version__)
 
@@ -31,6 +32,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error, precision_score, accuracy_score, f1_score
 from PyEMD import EMD, EEMD
 from scipy.stats import pearsonr
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score, average_precision_score, roc_auc_score, confusion_matrix, classification_report)
+import joblib
 
 # %%
 # =============================================================================
@@ -41,7 +46,7 @@ class SeismicDataProcessor:
     """Class for reading and storing seismic data"""
     
     def __init__(self, file_name_eq, file_name_noise, csv_file_eq, csv_file_noise, 
-                 mode='prod', eq_filters=None):
+                 mode='prod', eq_filters=None, nrows=None, chunksize=None):
         """Initialize the data processor"""
         self.file_name_eq = file_name_eq
         self.file_name_noise = file_name_noise
@@ -55,9 +60,9 @@ class SeismicDataProcessor:
         self.noise_data = {}  # {trace_name: (data, fs)}
         
         # Configure chunking based on mode
-        if mode == 'test':
-            self.chunksize = 20000
-            self.nrows = 20000
+        if mode == 'fast':
+            self.chunksize = chunksize if chunksize is not None else 20000
+            self.nrows = nrows if nrows is not None else 20000
         else:
             self.chunksize = None
             self.nrows = None
@@ -72,9 +77,9 @@ class SeismicDataProcessor:
             'source_distance_km': 'float32'
         }
         
-        if self.mode == 'test':
+        if self.mode == 'fast':
             chunks_eq = pd.read_csv(self.csv_file_eq, chunksize=self.chunksize, nrows=self.nrows, 
-                                  usecols=needed_columns, dtype=dtype_dict)
+                                  usecols=needed_columns, dtype=dtype_dict, low_memory=False)
             chunks_noise = pd.read_csv(self.csv_file_noise, chunksize=self.chunksize, nrows=self.nrows, 
                                      usecols=needed_columns, dtype=dtype_dict)
             total_chunks = min(self.nrows // self.chunksize + (1 if self.nrows % self.chunksize else 0), 
@@ -88,7 +93,7 @@ class SeismicDataProcessor:
     
     def _filter_data(self, chunk_eq, chunk_noise):
         """Filter earthquake and noise data based on specified criteria"""
-        if self.mode == 'test':
+        if self.mode == 'fast':
             filtered_eq = chunk_eq[chunk_eq.trace_category == self.eq_filters['trace_category']]
             
             if 'source_distance_km' in self.eq_filters and self.eq_filters['source_distance_km'] is not None:
@@ -103,10 +108,9 @@ class SeismicDataProcessor:
         else:
             filtered_eq = chunk_eq[chunk_eq.trace_category == self.eq_filters['trace_category']]
         
-        all_noise_data = chunk_noise[chunk_noise.trace_category == 'noise']
-        filtered_noise = all_noise_data.sample(n=len(filtered_eq), random_state=42) if not filtered_eq.empty else all_noise_data
+        filtered_noise = chunk_noise[chunk_noise.trace_category == 'noise']
         
-        return filtered_eq, filtered_noise, all_noise_data
+        return filtered_eq, filtered_noise, filtered_noise
     
     def load_data(self):
         """Load and store all seismic data"""
@@ -210,141 +214,6 @@ class PSDFeatureExtractor:
             all_labels.append(0)  # 0 for noise
             all_targets.append(0)
         
-        return np.array(all_features), np.array(all_labels), np.array(all_targets)
-
-class EMDFeatureExtractor:
-    """Class for extracting features using Empirical Mode Decomposition"""
-    
-    def __init__(self, n_imfs=None):
-        """Initialize the EMD feature extractor"""
-        self.n_imfs = n_imfs
-        self.emd = EMD()
-        self.emd.MAX_ITERATION = 500  # Limit sifting iterations to prevent hanging
-        self.max_imfs = 10  # Maximum number of IMFs to consider
-        self.timeout = 30  # Timeout in seconds for EMD decomposition
-    
-    def _check_imf_quality(self, imf, original):
-        """Check if an IMF meets quality criteria"""
-        # Check if IMF has enough extrema
-        extrema_count = len(np.where(np.diff(np.sign(np.diff(imf))))[0])
-        if extrema_count < 2:
-            return False
-            
-        # Check if IMF is not too similar to original signal
-        correlation = np.abs(np.corrcoef(imf, original)[0,1])
-        if correlation > 0.95:  # If IMF is too similar to original
-            return False
-            
-        return True
-    
-    def _calculate_imf_energy(self, imfs):
-        """Calculate energy distribution across IMFs"""
-        energies = np.array([np.sum(imf**2) for imf in imfs])
-        total_energy = np.sum(energies)
-        return energies / total_energy  # Normalized energy distribution
-    
-    def _calculate_imf_frequency(self, imf, fs):
-        """Calculate dominant frequency of an IMF using Welch's method"""
-        f, Pxx = welch(imf, fs=fs, nperseg=min(256, len(imf)))
-        return f[np.argmax(Pxx)]  # Return frequency with maximum power
-    
-    def _calculate_reconstruction_error(self, original, imfs):
-        """Calculate reconstruction error"""
-        reconstructed = np.sum(imfs, axis=0)
-        return np.mean((original - reconstructed)**2)
-    
-    def _safe_emd_decomposition(self, signal_data):
-        """Perform EMD decomposition with timeout"""
-        import signal as sig
-        
-        def timeout_handler(signum, frame):
-            raise TimeoutError("EMD decomposition timed out")
-        
-        # Set timeout handler
-        sig.signal(sig.SIGALRM, timeout_handler)
-        sig.alarm(self.timeout)
-        
-        try:
-            # Convert signal to numpy array if it isn't already
-            signal_data = np.asarray(signal_data)
-            
-            # Perform EMD decomposition
-            imfs = self.emd.emd(signal_data)
-            
-            # Convert to numpy array if it isn't already
-            if not isinstance(imfs, np.ndarray):
-                imfs = np.array(imfs)
-            
-            sig.alarm(0)  # Disable alarm
-            return imfs
-        except TimeoutError:
-            print_timestamp("    Warning: EMD decomposition timed out")
-            return None
-        except Exception as e:
-            print_timestamp(f"    Warning: EMD decomposition failed: {str(e)}")
-            return None
-        finally:
-            sig.alarm(0)  # Ensure alarm is disabled
-    
-    def extract_features(self, data, fs):
-        """Extract EMD features from seismic data. Return None if any component fails."""
-        features = []
-        for comp_idx in range(3):
-            signal = data[:, comp_idx]
-            try:
-                imfs = self._safe_emd_decomposition(signal)
-                if imfs is None:
-                    print_timestamp(f"    Warning: EMD decomposition failed for component {comp_idx}")
-                    return None  # Discard trace
-                # Filter IMFs based on quality
-                valid_imfs = []
-                for imf in imfs:
-                    if self._check_imf_quality(imf, signal):
-                        valid_imfs.append(imf)
-                    if len(valid_imfs) >= self.max_imfs:
-                        break
-                if not valid_imfs:
-                    print_timestamp(f"    Warning: No valid IMFs found for component {comp_idx}")
-                    return None  # Discard trace
-                if self.n_imfs is not None:
-                    valid_imfs = valid_imfs[:self.n_imfs]
-                # Calculate features for this component
-                energy_dist = self._calculate_imf_energy(valid_imfs)
-                features.extend(energy_dist)
-                freqs = [self._calculate_imf_frequency(imf, fs) for imf in valid_imfs]
-                features.extend(freqs)
-                error = self._calculate_reconstruction_error(signal, valid_imfs)
-                features.append(error)
-            except Exception as e:
-                print_timestamp(f"    Error in EMD decomposition for component {comp_idx}: {str(e)}")
-                return None  # Discard trace
-        return np.array(features)
-    
-    def process_data(self, eq_data, noise_data):
-        """Process all data and extract EMD features, discarding traces with failed EMD."""
-        all_features = []
-        all_labels = []
-        all_targets = []
-        # Process earthquake data
-        for trace_name, (data, fs, mag) in tqdm(eq_data.items(), desc='EMD EQ', total=len(eq_data)):
-            print_timestamp(f"Decomposing trace: {trace_name}")
-            features = self.extract_features(data, fs)
-            if features is None:
-                print_timestamp(f"    Discarding trace {trace_name} due to EMD failure.")
-                continue
-            all_features.append(features)
-            all_labels.append(1)  # 1 for earthquake
-            all_targets.append(mag)
-        # Process noise data
-        for trace_name, (data, fs) in tqdm(noise_data.items(), desc='EMD Noise', total=len(noise_data)):
-            print_timestamp(f"Decomposing trace: {trace_name}")
-            features = self.extract_features(data, fs)
-            if features is None:
-                print_timestamp(f"    Discarding trace {trace_name} due to EMD failure.")
-                continue
-            all_features.append(features)
-            all_labels.append(0)  # 0 for noise
-            all_targets.append(0)
         return np.array(all_features), np.array(all_labels), np.array(all_targets)
 
 # %%
@@ -472,160 +341,149 @@ class FeatureVisualizer:
 # 5. Classification and Regression Module
 # =============================================================================
 
+class PSDFeatureTransformer(BaseEstimator, TransformerMixin):
+    """Sklearn-compatible transformer for PSD feature extraction."""
+    def __init__(self, n_bins=50):
+        self.n_bins = n_bins
+        self.extractor = PSDFeatureExtractor(n_bins=n_bins)
+    def fit(self, X, y=None):
+        return self
+    def transform(self, X):
+        # X is a list/array of (data, fs) tuples
+        features = [self.extractor.extract_features(data, fs)[0] for data, fs in X]
+        return np.array(features)
+
 class SeismicClassifier:
-    """Class for seismic signal classification"""
+    """Class for seismic signal classification using a pipeline."""
     
-    def __init__(self, test_size=0.3, random_state=42):
-        """Initialize the classifier"""
+    def __init__(self, test_size=0.3, random_state=42, n_bins=50, feature_transformer=None):
         self.test_size = test_size
         self.random_state = random_state
-        self.scaler = StandardScaler()
-        self.clf = None
+        self.n_bins = n_bins
+        self.pipeline = None
         self.training_time = None
-    
-    def save_model(self, model_path, scaler_path):
-        """Save the classifier and scaler to files"""
-        import pickle
-        
-        if self.clf is None:
-            raise ValueError("No trained model to save")
-            
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        os.makedirs(os.path.dirname(scaler_path), exist_ok=True)
-        
-        # Save classifier
-        with open(model_path, 'wb') as f:
-            pickle.dump(self.clf, f)
-            
-        # Save scaler
-        with open(scaler_path, 'wb') as f:
-            pickle.dump(self.scaler, f)
-            
-        print_timestamp(f"Model saved to {model_path}")
-        print_timestamp(f"Scaler saved to {scaler_path}")
-    
-    def load_model(self, model_path, scaler_path):
-        """Load a saved classifier and scaler"""
-        import pickle
-        
-        # Load classifier
-        with open(model_path, 'rb') as f:
-            self.clf = pickle.load(f)
-            
-        # Load scaler
-        with open(scaler_path, 'rb') as f:
-            self.scaler = pickle.load(f)
-            
-        print_timestamp(f"Model loaded from {model_path}")
-        print_timestamp(f"Scaler loaded from {scaler_path}")
-    
-    def _prepare_data(self, features, labels):
-        """Prepare data for training and testing"""
-        X_train, X_test, Y_train, Y_test = train_test_split(
-            features, labels, 
-            test_size=self.test_size, 
-            random_state=self.random_state,
-            stratify=labels
-        )
+        if feature_transformer is not None:
+            self.feature_transformer = feature_transformer
+        else:
+            self.feature_transformer = PSDFeatureTransformer(n_bins=self.n_bins)
 
-        # Print class distribution
-        print_timestamp(f"Train set class distribution: {np.bincount(Y_train)}")
-        print_timestamp(f"Test set class distribution: {np.bincount(Y_test)}")
-        
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
-        
-        return X_train_scaled, X_test_scaled, Y_train, Y_test
+    def _prepare_data(self, eq_data, noise_data):
+        # Prepare raw input for the pipeline: list of (data, fs), labels, and trace names
+        X = []
+        y = []
+        trace_names = []
+        for k, v in eq_data.items():
+            X.append((v[0], v[1]))
+            y.append(1)
+            trace_names.append(k)
+        for k, v in noise_data.items():
+            X.append((v[0], v[1]))
+            y.append(0)
+            trace_names.append(k)
+        return np.array(X, dtype=object), np.array(y), np.array(trace_names)
     
-    def train(self, features, labels):
-        """Train the classifier"""
-        X_train_scaled, X_test_scaled, Y_train, Y_test = self._prepare_data(features, labels)
+    def train(self, eq_data_train, noise_data_train, eq_data_val, noise_data_val):
+        print_timestamp("Starting training process...")
         
-        self.clf = LogisticRegression(
-            max_iter=100,
-            solver='saga',
-            C=0.1,
-            class_weight='balanced',
-            n_jobs=-1,
-            random_state=self.random_state,
-            tol=1e-3
-        )
-        
-        start_time = time.time()
-        self.clf.fit(X_train_scaled, Y_train)
-        self.training_time = time.time() - start_time
-        
-        Y_pred = self.clf.predict(X_test_scaled)
-        precision = precision_score(Y_test, Y_pred)
-        accuracy = accuracy_score(Y_test, Y_pred)
-        f1 = f1_score(Y_test, Y_pred)
-        
-        return precision, accuracy, f1
-    
-    def predict(self, features):
-        """Make predictions on new data"""
-        if self.clf is None:
-            raise ValueError("Model must be trained before making predictions")
-            
-        features_scaled = self.scaler.transform(features)
-        return self.clf.predict(features_scaled)
-    
-    def get_training_time(self):
-        """Get the training time in seconds"""
-        return self.training_time
+        # Prepare training and validation sets
+        X_train, y_train, trace_names_train = self._prepare_data(eq_data_train, noise_data_train)
+        X_val, y_val, trace_names_val = self._prepare_data(eq_data_val, noise_data_val)
+       
+        # Check for overlap
+        overlap = set(trace_names_train) & set(trace_names_val)
+        print_timestamp(f"Number of overlapping trace names between train and validation: {len(overlap)}")
+        if overlap:
+            print_timestamp(f"Example overlaps: {list(overlap)[:10]}")
+        else:
+            print_timestamp("No overlap detected!")
 
-class SeismicRegressor:
-    """Class for seismic magnitude regression"""
-    
-    def __init__(self, test_size=0.3, random_state=42):
-        """Initialize the regressor"""
-        self.test_size = test_size
-        self.random_state = random_state
-        self.scaler = StandardScaler()
-        self.reg = None
-        self.training_time = None
-        
-    def _prepare_data(self, features, targets):
-        """Prepare data for training and testing"""
-        X_train, X_test, Y_train, Y_test = train_test_split(
-            features, targets,
-            test_size=self.test_size,
-            random_state=self.random_state
-        )
-        
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
-        
-        return X_train_scaled, X_test_scaled, Y_train, Y_test
-    
-    def train(self, features, targets):
-        """Train the regressor"""
-        X_train_scaled, X_test_scaled, Y_train, Y_test = self._prepare_data(features, targets)
-        
-        self.reg = LinearRegression(n_jobs=-1)
-        
+        # Print dataset sizes
+        print_timestamp(f"Train set: {len(X_train)} samples ({sum(y_train)} earthquakes, {len(y_train)-sum(y_train)} noise)")
+        print_timestamp(f"Validation set: {len(X_val)} samples ({sum(y_val)} earthquakes, {len(y_val)-sum(y_val)} noise)")
+
+        # Initialize the pipeline
+        self.pipeline = Pipeline([
+            ('feature', self.feature_transformer),
+            ('scaler', StandardScaler()),
+            ('clf', LogisticRegression(
+                max_iter=1000,
+                solver='saga',
+                verbose=1,
+                C=0.01,
+                class_weight='balanced',
+                n_jobs=-1,
+                random_state=self.random_state,
+                tol=1e-4,
+                penalty='elasticnet',
+                l1_ratio=0.5
+            ))
+        ])
+
+        print_timestamp("Extracting features...")
+        # Extract and save features for distribution analysis
+        feature_extractor = self.pipeline.named_steps['feature']
+        X_train_features = feature_extractor.transform(X_train)
+        X_val_features = feature_extractor.transform(X_val)
+        np.save('train_features.npy', X_train_features)
+        np.save('val_features.npy', X_val_features)
+        np.save('train_labels.npy', y_train)
+        np.save('val_labels.npy', y_val)
+
+        # Train the pipeline    
+        print_timestamp("Training...")
+        import time
         start_time = time.time()
-        self.reg.fit(X_train_scaled, Y_train)
+        self.pipeline.fit(X_train, y_train)
         self.training_time = time.time() - start_time
-        
-        Y_pred = self.reg.predict(X_test_scaled)
-        r2 = r2_score(Y_test, Y_pred)
-        mae = mean_absolute_error(Y_test, Y_pred)
-        
-        return r2, mae
+
+        # Evaluate the pipeline
+        print_timestamp("Evaluating...")
+        y_val_pred = self.pipeline.predict(X_val)
+        y_pred_proba = self.pipeline.predict_proba(X_val)[:, 1]
+        metrics = self.evaluate(y_val, y_val_pred, y_pred_proba)
+        if hasattr(self.pipeline['clf'], 'coef_'):
+            coef = self.pipeline['clf'].coef_[0]
+            print_timestamp("Top 10 most important features:")
+            for idx in np.argsort(np.abs(coef))[-10:]:
+                print_timestamp(f"  Feature {idx}: {coef[idx]:.4f}")
+
+        return metrics
     
-    def predict(self, features):
-        """Make predictions on new data"""
-        if self.reg is None:
-            raise ValueError("Model must be trained before making predictions")
-            
-        features_scaled = self.scaler.transform(features)
-        return self.reg.predict(features_scaled)
+    def predict(self, X):
+        # X: list/array of (data, fs)
+        if self.pipeline is None:
+            raise ValueError("Pipeline must be trained or loaded before prediction.")
+        return self.pipeline.predict(X)
     
-    def get_training_time(self):
-        """Get the training time in seconds"""
-        return self.training_time
+    def predict_proba(self, X):
+        if self.pipeline is None:
+            raise ValueError("Pipeline must be trained or loaded before prediction.")
+        return self.pipeline.predict_proba(X)
+    
+    def save_pipeline(self, path):
+        if self.pipeline is None:
+            raise ValueError("No trained pipeline to save")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        joblib.dump(self.pipeline, path)
+        print_timestamp(f"Pipeline saved to {path}")
+
+    def load_pipeline(self, path):
+        self.pipeline = joblib.load(path)
+        print_timestamp(f"Pipeline loaded from {path}")
+
+    @staticmethod
+    def evaluate(y_true, y_pred, y_pred_proba):
+        results = {}
+        results['accuracy'] = accuracy_score(y_true, y_pred)
+        results['precision'] = precision_score(y_true, y_pred)
+        results['recall'] = recall_score(y_true, y_pred)
+        results['f1'] = f1_score(y_true, y_pred)
+        results['pr_auc'] = average_precision_score(y_true, y_pred_proba)
+        results['roc_auc'] = roc_auc_score(y_true, y_pred_proba)
+        results['confusion_matrix'] = confusion_matrix(y_true, y_pred)
+        results['classification_report'] = classification_report(y_true, y_pred, digits=3)
+        return results
+
 
 # %%
 # =============================================================================
@@ -633,130 +491,85 @@ class SeismicRegressor:
 # =============================================================================
 
 if __name__ == "__main__":
-    # File paths
-    file_name_eq = r"/users/230442014/archive/STEAD_dataset/chunk2.hdf5"
-    csv_file_eq = r"/users/230442014/archive/STEAD_dataset/chunk2.csv"
-    file_name_noise = r"/users/230442014/archive/STEAD_dataset/chunk1.hdf5"
-    csv_file_noise = r"/users/230442014/archive/STEAD_dataset/chunk1.csv"
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Seismic PSD/EMD Classification")
+    parser.add_argument('--mode', type=str, default='fast', choices=['fast', 'prod'], help='Mode: fast or prod')
+    parser.add_argument('--nrows', type=int, default=20000, help='Number of rows to load in fast mode')
+    parser.add_argument('--chunksize', type=int, default=20000, help='Chunk size to use in fast mode')
+    # Add arguments for train/val file paths
+    parser.add_argument('--eq_h5', type=str, required=True, help='Earthquake HDF5 file (shared)')
+    parser.add_argument('--noise_h5', type=str, required=True, help='Noise HDF5 file (shared)')
+    parser.add_argument('--train_eq_csv', type=str, required=True, help='Training earthquake CSV file')
+    parser.add_argument('--train_noise_csv', type=str, required=True, help='Training noise CSV file')
+    parser.add_argument('--val_eq_csv', type=str, required=True, help='Validation earthquake CSV file')
+    parser.add_argument('--val_noise_csv', type=str, required=True, help='Validation noise CSV file')
+    args = parser.parse_args()
+
+    # File paths for training and validation
+    eq_h5 = args.eq_h5
+    noise_h5 = args.noise_h5
+    train_csv_file_eq = args.train_eq_csv
+    train_csv_file_noise = args.train_noise_csv
+    val_csv_file_eq = args.val_eq_csv
+    val_csv_file_noise = args.val_noise_csv
     
     # Configuration
-    MODE = 'test'
+    MODE = args.mode
     EQ_FILTERS = {'trace_category': 'earthquake_local'}
     
-    print_timestamp("Loading data...")
+    print_timestamp("Loading training data...")
     load_start = time.time()
-    processor = SeismicDataProcessor(
-        file_name_eq=file_name_eq,
-        file_name_noise=file_name_noise,
-        csv_file_eq=csv_file_eq,
-        csv_file_noise=csv_file_noise,
+    train_processor = SeismicDataProcessor(
+        file_name_eq=eq_h5,
+        file_name_noise=noise_h5,
+        csv_file_eq=train_csv_file_eq,
+        csv_file_noise=train_csv_file_noise,
         mode=MODE,
-        eq_filters=EQ_FILTERS
+        eq_filters=EQ_FILTERS,
+        nrows=args.nrows if MODE == 'fast' else None,
+        chunksize=args.chunksize if MODE == 'fast' else None
     )
-    eq_data, noise_data = processor.load_data()
+    eq_data_train, noise_data_train = train_processor.load_data()
+    print_timestamp("Training data loaded successfully.")
+    
+    print_timestamp("Loading validation data...")
+    val_processor = SeismicDataProcessor(
+        file_name_eq=eq_h5,
+        file_name_noise=noise_h5,
+        csv_file_eq=val_csv_file_eq,
+        csv_file_noise=val_csv_file_noise,
+        mode=MODE,
+        eq_filters=EQ_FILTERS,
+        nrows=args.nrows if MODE == 'fast' else None,
+        chunksize=args.chunksize if MODE == 'fast' else None
+    )
+    eq_data_val, noise_data_val = val_processor.load_data()
     load_end = time.time()
     print_timestamp(f"Data loading took {load_end - load_start:.2f} seconds.")
     
     # Get current timestamp and dataset size for model filenames
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dataset_size = "all" if processor.nrows is None else f"n{processor.nrows}"
+    dataset_size = "all" if train_processor.nrows is None else f"n{train_processor.nrows}"
     
     # Model save paths
     MODEL_DIR = "saved_models"
-    PSD_MODEL_PATH = os.path.join(MODEL_DIR, f"psd_classifier_{dataset_size}_{timestamp}.pkl")
-    PSD_SCALER_PATH = os.path.join(MODEL_DIR, f"psd_scaler_{dataset_size}_{timestamp}.pkl")
-    EMD_MODEL_PATH = os.path.join(MODEL_DIR, f"emd_classifier_{dataset_size}_{timestamp}.pkl")
-    EMD_SCALER_PATH = os.path.join(MODEL_DIR, f"emd_scaler_{dataset_size}_{timestamp}.pkl")
+    PSD_MODEL_PATH = os.path.join(MODEL_DIR, f"{timestamp}_{dataset_size}_psd_classifier.pkl")
     
-    print_timestamp("Initializing feature extractors and visualizer...")
-    psd_extractor = PSDFeatureExtractor()
-    emd_extractor = EMDFeatureExtractor(n_imfs=5)
-    visualizer = FeatureVisualizer()
-    
-    print_timestamp("Visualizing features...")
-    # Get first earthquake and noise trace
-    eq_trace = next(iter(eq_data.items()))
-    noise_trace = next(iter(noise_data.items()))
-    
-    # PSD visualization
-    eq_trace_data, eq_fs, _ = eq_trace[1]
-    eq_features, eq_freq_bins = psd_extractor.extract_features(eq_trace_data, eq_fs)
-    fig_psd_eq = visualizer.plot_psd_features(
-        eq_trace_data, eq_fs, eq_features, eq_freq_bins,
-        title="PSD Features - Earthquake"
-    )
-    visualizer.save_figure(fig_psd_eq, "psd_features_earthquake.png")
-    
-    noise_trace_data, noise_fs = noise_trace[1]
-    noise_features, noise_freq_bins = psd_extractor.extract_features(noise_trace_data, noise_fs)
-    fig_psd_noise = visualizer.plot_psd_features(
-        noise_trace_data, noise_fs, noise_features, noise_freq_bins,
-        title="PSD Features - Noise"
-    )
-    visualizer.save_figure(fig_psd_noise, "psd_features_noise.png")
-    
-    # EMD visualization
-    eq_imfs = []
-    for i, comp in enumerate(['East', 'North', 'Vertical']):
-        print_timestamp(f"{comp} data shape: {eq_trace_data[:, i].shape}")
-        imfs = emd_extractor.emd(eq_trace_data[:, i])
-        print_timestamp(f"{comp} IMFs: {imfs.shape}")
-        eq_imfs.append(imfs[:emd_extractor.n_imfs])  # Limit to n_imfs
-
-    eq_features = emd_extractor.extract_features(eq_trace_data, eq_fs)
-    fig_emd_eq = visualizer.plot_emd_features(
-        eq_trace_data, eq_fs, eq_imfs, eq_features, emd_extractor.n_imfs,
-        title="EMD Features - Earthquake"
-    )
-    visualizer.save_figure(fig_emd_eq, "emd_features_earthquake.png")
-    
-    noise_imfs = [emd_extractor.emd(noise_trace_data[:, i])[:emd_extractor.n_imfs] for i in range(3)]
-    noise_features = emd_extractor.extract_features(noise_trace_data, noise_fs)
-    fig_emd_noise = visualizer.plot_emd_features(
-        noise_trace_data, noise_fs, noise_imfs, noise_features, emd_extractor.n_imfs,
-        title="EMD Features - Noise"
-    )
-    visualizer.save_figure(fig_emd_noise, "emd_features_noise.png")
-    
-    print_timestamp("Extracting PSD features...")
-    psd_start = time.time()
-    psd_features, psd_labels, psd_targets = psd_extractor.process_data(eq_data, noise_data)
-    psd_end = time.time()
-    print_timestamp(f"PSD feature extraction took {psd_end - psd_start:.2f} seconds.")
-    
-    # Print full dataset class distribution
-    unique, counts = np.unique(psd_labels, return_counts=True)
-    print_timestamp("Full dataset class distribution:")
-    for u, c in zip(unique, counts):
-        print_timestamp(f"  Class {u}: {c}")
-    
-    print_timestamp("Extracting EMD features...")
-    emd_start = time.time()
-    emd_features, emd_labels, emd_targets = emd_extractor.process_data(eq_data, noise_data)
-    emd_end = time.time()
-    print_timestamp(f"EMD feature extraction took {emd_end - emd_start:.2f} seconds.")
-    
+    print_timestamp("Initializing feature extractor...")
+    psd_extractor = PSDFeatureExtractor()       
+   
     print_timestamp("Training classifier with PSD features...")
     psd_clf_start = time.time()
-    psd_classifier = SeismicClassifier()
-    psd_precision, psd_accuracy, psd_f1 = psd_classifier.train(psd_features, psd_labels)
+    psd_classifier = SeismicClassifier(feature_transformer=PSDFeatureTransformer(n_bins=50))
+    psd_metrics = psd_classifier.train(eq_data_train, noise_data_train, eq_data_val, noise_data_val)
     psd_clf_end = time.time()
-    print_timestamp(f"PSD Classification results: Precision={psd_precision:.3f}, Accuracy={psd_accuracy:.3f}, F1={psd_f1:.3f}")
+    print_timestamp("PSD Classification results:")
+    for metric, value in psd_metrics.items():
+        print_timestamp(f"  {metric}: {value}")
     print_timestamp(f"PSD Classification took {psd_clf_end - psd_clf_start:.2f} seconds.")
     
     # Save PSD model
-    psd_classifier.save_model(PSD_MODEL_PATH, PSD_SCALER_PATH)
-    
-    print_timestamp("Training classifier with EMD features...")
-    emd_clf_start = time.time()
-    emd_classifier = SeismicClassifier()
-    emd_precision, emd_accuracy, emd_f1 = emd_classifier.train(emd_features, emd_labels)
-    emd_clf_end = time.time()
-    print_timestamp(f"EMD Classification results: Precision={emd_precision:.3f}, Accuracy={emd_accuracy:.3f}, F1={emd_f1:.3f}")
-    print_timestamp(f"EMD Classification took {emd_clf_end - emd_clf_start:.2f} seconds.")
-    
-    # Save EMD model
-    emd_classifier.save_model(EMD_MODEL_PATH, EMD_SCALER_PATH)
+    psd_classifier.save_pipeline(PSD_MODEL_PATH)
     
     # Print total execution time
     total_time = time.time() - load_start
