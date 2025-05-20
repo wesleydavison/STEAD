@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 import h5py
 from seismic_ml import SeismicClassifier, print_timestamp
-from psd_classification import (
-    PSDFeatureExtractor,
-    PSDFeatureTransformer
-)
+from seismic_ml import print_timestamp
+from emd_classification import EMDFeatureTransformer
 from sklearn.metrics import precision_score, f1_score, classification_report, confusion_matrix, average_precision_score, roc_auc_score
 import argparse
 from sklearn.utils import resample
+from tqdm import tqdm
 
 # --- Configuration ---
 file_name_merged = r"/users/230442014/archive/STEAD_dataset/merged.hdf5"
 # Use separate CSVs for earthquake and noise
-parser = argparse.ArgumentParser(description="Test seismic classifier pipeline.")
-parser.add_argument('--model_path', type=str, help='Path to the saved model pipeline .pkl file')
+parser = argparse.ArgumentParser(description="Test seismic EMD classifier pipeline.")
+parser.add_argument('--model_path', type=str, help='Path to the saved EMD model pipeline .pkl file')
 parser.add_argument('--eq_csv', type=str, required=True, help='CSV file for earthquake traces')
 parser.add_argument('--noise_csv', type=str, required=True, help='CSV file for noise traces')
 args = parser.parse_args()
@@ -47,31 +46,26 @@ y_test = []
 failed_traces = 0
 
 with h5py.File(file_name_merged, 'r') as h5f:
-    for _, row in sampled_df.iterrows():
+    for _, row in tqdm(sampled_df.iterrows(), total=len(sampled_df), desc='Loading traces'):
         trace_name = row['trace_name']
         trace_category = row['trace_category']
         label = 1 if trace_category == 'earthquake_local' else 0
-        
         # Load the trace data
         ds = h5f.get(f"data/{trace_name}")
         if ds is None:
             failed_traces += 1
             print_timestamp(f"Warning: Could not load trace {trace_name}")
             continue
-            
         try:
             data = np.array(ds)
             fs = float(ds.attrs.get('sampling_rate', 100.0))
-            
             # Basic data validation
             if data.shape[1] != 3:  # Should have 3 components
                 failed_traces += 1
                 print_timestamp(f"Warning: Invalid data shape for trace {trace_name}: {data.shape}")
                 continue
-                
             X_test.append((data, fs))
             y_test.append(label)
-            
         except Exception as e:
             failed_traces += 1
             print_timestamp(f"Error processing trace {trace_name}: {str(e)}")
@@ -85,14 +79,17 @@ X_test = np.array(X_test, dtype=object)
 y_test = np.array(y_test)
 
 # Load and apply model
-print_timestamp("Loading pipeline...")
-classifier = SeismicClassifier()
+print_timestamp("Loading EMD pipeline...")
+classifier = SeismicClassifier(feature_transformer=EMDFeatureTransformer(n_imfs=5))
 classifier.load_pipeline(MODEL_PATH)
 
-# Extract features using the model's feature transformer
+# Extract features using the model's EMD feature transformer
 feature_transformer = classifier.pipeline.named_steps['feature']
 test_features = feature_transformer.transform(X_test)
-np.save("test_features.npy", test_features)
+# Filter y_test to only valid indices
+if hasattr(feature_transformer, 'valid_indices_') and feature_transformer.valid_indices_ is not None:
+    y_test = y_test[feature_transformer.valid_indices_]
+np.save("emd_test_features.npy", test_features)
 print(f"Test features shape: {test_features.shape}")
 
 print_timestamp("Predicting...")
@@ -112,6 +109,6 @@ print("Confusion Matrix:\n", metrics['confusion_matrix'])
 print("Classification Report:\n", metrics['classification_report'])
 
 # Save predictions for analysis
-np.save("test_predictions.npy", y_pred)
-np.save("test_true_labels.npy", y_test)
-np.save("test_probabilities.npy", y_pred_proba) 
+np.save("emd_test_predictions.npy", y_pred)
+np.save("emd_test_true_labels.npy", y_test)
+np.save("emd_test_probabilities.npy", y_pred_proba) 

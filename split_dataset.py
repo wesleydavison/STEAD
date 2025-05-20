@@ -12,6 +12,9 @@ split_sizes = [100000, 40000]  # df1: 100k, df2: 40k, df3: rest
 for file_path in input_files:
     # Load the data
     df = pd.read_csv(file_path, low_memory=False)
+    print(f"{file_path}: {len(df)} rows loaded")
+    print("First 3 rows:\n", df.head(3))
+    print("Last 3 rows:\n", df.tail(3))
     
     # Shuffle (set seed for reproducibility)
     df_shuf = df.sample(frac=1, random_state=42).reset_index(drop=True)
@@ -29,9 +32,9 @@ for file_path in input_files:
     
     # Output filenames
     base = file_path.split('/')[-1].replace('.csv', '')
-    out1 = f'/users/230442014/archive/STEAD_dataset/{base}_100k.csv'
-    out2 = f'/users/230442014/archive/STEAD_dataset/{base}_40k.csv'
-    out3 = f'/users/230442014/archive/STEAD_dataset/{base}_rest.csv'
+    out1 = f'/users/230442014/archive/STEAD_dataset/DEBUG_{base}_100k.csv'
+    out2 = f'/users/230442014/archive/STEAD_dataset/DEBUG_{base}_40k.csv'
+    out3 = f'/users/230442014/archive/STEAD_dataset/DEBUG_{base}_rest.csv'
     
     # Write out
     df1.to_csv(out1, index=False)
