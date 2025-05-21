@@ -17,6 +17,7 @@ import os
 import pandas as pd
 import h5py
 from seismic_ml import SeismicDataProcessor, SeismicClassifier
+from pysdkit import FAEMD
 
 # Utility function for timestamped prints
 def print_timestamp(message):
@@ -25,21 +26,33 @@ def print_timestamp(message):
 class EMDFeatureExtractor:
     """Class for extracting features using Empirical Mode Decomposition"""
 
-    def __init__(self, n_imfs=None):
+    def __init__(self, n_imfs=None, max_sifts=10):
         self.n_imfs = n_imfs
-        self.emd_decomposer = EMD(max_imf=n_imfs)
+        self.max_sifts = max_sifts
+        # self.emd_decomposer = EMD(max_imf=n_imfs, max_sifts=self.max_sifts, spline_kind='linear')  # Try linear instead of cubic)
+        self.emd_decomposer = FAEMD(max_imfs=n_imfs)
 
     def _calculate_imf_energy(self, imfs):
         energies = np.array([np.sum(imf**2) for imf in imfs])
         total_energy = np.sum(energies)
+        if total_energy == 0:
+            return np.zeros_like(energies)
         return energies / total_energy
     
     def _calculate_imf_frequency(self, imf, fs):
+        if np.all(imf == 0) or len(imf) < 2:
+            return 0.0
         f, Pxx = welch(imf, fs=fs, nperseg=min(256, len(imf)))
+        if len(Pxx) == 0 or np.all(Pxx == 0):
+            return 0.0
         return f[np.argmax(Pxx)]
     
     def _calculate_reconstruction_error(self, original, imfs):
+        if imfs is None or len(imfs) == 0:
+            return 0.0
         reconstructed = np.sum(imfs, axis=0)
+        if len(original) != len(reconstructed):
+            return 0.0
         return np.mean((original - reconstructed)**2)
 
     def extract_features(self, data, fs):
@@ -47,13 +60,15 @@ class EMDFeatureExtractor:
         for comp_idx in range(3):
             signal = data[:, comp_idx]
             try:
-                imfs = self.emd_decomposer.emd(signal)
+                # imfs = self.emd_decomposer.emd(signal)
+                imfs = self.emd_decomposer.fit_transform(signal)
                 if imfs is None or len(imfs) == 0:
                     print_timestamp(f"    Warning: EMD decomposition failed for component {comp_idx}")
                     return None
 
                 # Use all IMFs without filtering
                 valid_imfs = imfs
+                valid_imfs = [imf if np.all(np.isfinite(imf)) else np.zeros_like(imf) for imf in valid_imfs]
 
                 # Pad or truncate to required number of IMFs
                 n_needed = self.n_imfs or len(valid_imfs)
@@ -72,7 +87,7 @@ class EMDFeatureExtractor:
                 print_timestamp(f"    Error in EMD decomposition for component {comp_idx}: {str(e)}")
                 return None
         features = np.array(features)
-        
+        features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
         return features
     
     def process_data(self, eq_data, noise_data):

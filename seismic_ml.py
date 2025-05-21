@@ -12,6 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score, average_precision_score, roc_auc_score, confusion_matrix, classification_report)
 import joblib
+import time
 
 def print_timestamp(message):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
@@ -34,6 +35,7 @@ class SeismicDataProcessor:
         else:
             self.chunksize = None
             self.nrows = None
+
     def _load_data_chunks(self):
         needed_columns = ['trace_name', 'trace_category', 'source_magnitude', 'source_distance_km']
         dtype_dict = {
@@ -59,6 +61,7 @@ class SeismicDataProcessor:
             chunks_noise = [pd.read_csv(self.csv_file_noise, usecols=needed_columns, dtype=dtype_dict)]
             total_chunks = 1
         return chunks_eq, chunks_noise, total_chunks
+    
     def _filter_data(self, chunk_eq, chunk_noise):
         if self.mode == 'fast':
             filtered_eq = chunk_eq[chunk_eq.trace_category == self.eq_filters['trace_category']]
@@ -74,6 +77,7 @@ class SeismicDataProcessor:
             filtered_eq = chunk_eq[chunk_eq.trace_category == self.eq_filters['trace_category']]
         filtered_noise = chunk_noise[chunk_noise.trace_category == 'noise']
         return filtered_eq, filtered_noise, filtered_noise
+    
     def load_data(self):
         chunks_eq, chunks_noise, total_chunks = self._load_data_chunks()
         with tqdm(total=total_chunks, desc=f"Loading chunks ({self.mode} mode)") as pbar:
@@ -109,17 +113,16 @@ class SeismicDataProcessor:
 
 class SeismicClassifier:
     """Class for seismic signal classification using a pipeline."""
+
     def __init__(self, test_size=0.3, random_state=42, n_bins=50, feature_transformer=None):
         self.test_size = test_size
         self.random_state = random_state
         self.n_bins = n_bins
         self.pipeline = None
         self.training_time = None
-        if feature_transformer is not None:
-            self.feature_transformer = feature_transformer
-        else:
-            from psd_classification import PSDFeatureTransformer
-            self.feature_transformer = PSDFeatureTransformer(n_bins=self.n_bins)
+        self.feature_transformer = feature_transformer
+ 
+
     def _prepare_data(self, eq_data, noise_data):
         X = []
         y = []
@@ -133,6 +136,7 @@ class SeismicClassifier:
             y.append(0)
             trace_names.append(k)
         return np.array(X, dtype=object), np.array(y), np.array(trace_names)
+    
     def train(self, eq_data_train, noise_data_train, eq_data_val, noise_data_val):
         print_timestamp("Starting training process...")
         X_train, y_train, trace_names_train = self._prepare_data(eq_data_train, noise_data_train)
@@ -143,8 +147,10 @@ class SeismicClassifier:
             print_timestamp(f"Example overlaps: {list(overlap)[:10]}")
         else:
             print_timestamp("No overlap detected!")
+        
         print_timestamp(f"Train set: {len(X_train)} samples ({sum(y_train)} earthquakes, {len(y_train)-sum(y_train)} noise)")
         print_timestamp(f"Validation set: {len(X_val)} samples ({sum(y_val)} earthquakes, {len(y_val)-sum(y_val)} noise)")
+        
         self.pipeline = Pipeline([
             ('feature', self.feature_transformer),
             ('scaler', StandardScaler()),
@@ -161,26 +167,46 @@ class SeismicClassifier:
                 l1_ratio=0.5
             ))
         ])
-        print_timestamp("Extracting features...")
+        print_timestamp("Extracting features of TRAINING set...")
         feature_extractor = self.pipeline.named_steps['feature']
         X_train_features = feature_extractor.transform(X_train)
+        print("NaNs in X_train_features:", np.isnan(X_train_features).sum(), flush=True)
+        if np.isnan(X_train_features).any():
+            nan_rows, nan_cols = np.where(np.isnan(X_train_features))
+            print(f"NaNs found at rows: {nan_rows}, columns: {nan_cols}", flush=True)
+            print(f"First 10 NaN locations: {list(zip(nan_rows, nan_cols))[:10]}", flush=True)
+            nan_rows_unique = np.unique(nan_rows)
+            for i in nan_rows_unique[:3]:  # Show up to 3 problematic samples
+                print(f"Input X_train[{i}]: {X_train[i]}", flush=True)
+        # Check for NaNs in the raw input before feature extraction
+        print("NaNs in X_train (raw):", np.array([np.isnan(x[0]).any() for x in X_train]).sum(), flush=True)
+
+        # Print feature statistics
+        print("Feature stats (all):", X_train_features.mean(), X_train_features.std(), X_train_features.min(), X_train_features.max())
+        print("Feature stats (earthquake):", X_train_features[y_train == 1].mean(), X_train_features[y_train == 1].std())
+        print("Feature stats (noise):", X_train_features[y_train == 0].mean(), X_train_features[y_train == 0].std())
+
         if hasattr(feature_extractor, 'valid_indices_') and feature_extractor.valid_indices_ is not None:
             y_train = y_train[feature_extractor.valid_indices_]
             X_train = X_train[feature_extractor.valid_indices_]
+
+        print_timestamp("Extracting features of VALIDATION set...")
         X_val_features = feature_extractor.transform(X_val)
         if hasattr(feature_extractor, 'valid_indices_') and feature_extractor.valid_indices_ is not None:
             y_val = y_val[feature_extractor.valid_indices_]
             X_val = X_val[feature_extractor.valid_indices_]
-        np.save('train_features.npy', X_train_features)
-        np.save('val_features.npy', X_val_features)
-        np.save('train_labels.npy', y_train)
-        np.save('val_labels.npy', y_val)
-        print_timestamp("Training...")
-        import time
+
+        np.save('emd_train_features.npy', X_train_features)
+        np.save('emd_val_features.npy', X_val_features)
+        np.save('emd_train_labels.npy', y_train)
+        np.save('emd_val_labels.npy', y_val)
+
+        print_timestamp("!!!!! TRAINING !!!!!")
         start_time = time.time()
         self.pipeline.fit(X_train, y_train)
         self.training_time = time.time() - start_time
-        print_timestamp("Evaluating...")
+
+        print_timestamp("**** EVALUATING ****")
         y_val_pred = self.pipeline.predict(X_val)
         y_pred_proba = self.pipeline.predict_proba(X_val)[:, 1]
         metrics = self.evaluate(y_val, y_val_pred, y_pred_proba)
@@ -190,23 +216,28 @@ class SeismicClassifier:
             for idx in np.argsort(np.abs(coef))[-10:]:
                 print_timestamp(f"  Feature {idx}: {coef[idx]:.4f}")
         return metrics
+    
     def predict(self, X):
         if self.pipeline is None:
             raise ValueError("Pipeline must be trained or loaded before prediction.")
         return self.pipeline.predict(X)
+    
     def predict_proba(self, X):
         if self.pipeline is None:
             raise ValueError("Pipeline must be trained or loaded before prediction.")
         return self.pipeline.predict_proba(X)
+    
     def save_pipeline(self, path):
         if self.pipeline is None:
             raise ValueError("No trained pipeline to save")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         joblib.dump(self.pipeline, path)
         print_timestamp(f"Pipeline saved to {path}")
+
     def load_pipeline(self, path):
         self.pipeline = joblib.load(path)
         print_timestamp(f"Pipeline loaded from {path}")
+        
     @staticmethod
     def evaluate(y_true, y_pred, y_pred_proba):
         results = {}
