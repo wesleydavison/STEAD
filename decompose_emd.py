@@ -4,8 +4,13 @@ import h5py
 import os
 from PyEMD import EMD
 import matplotlib.pyplot as plt
+from scipy.stats import skew, kurtosis
+import numpy as np
+from scipy.signal import hilbert
 
-def plot_emd_features(data, fs, imfs, n_imfs, features=None, title="EMD Features"):
+
+
+def plot_emd_features(data, fs, imfs, n_imfs, features=None, title="EMD Features", stats=None):
     """Plot EMD features for a single trace"""
     n_imfs_to_plot = min(n_imfs, max(imf.shape[0] for imf in imfs))
     n_features_per_comp = n_imfs_to_plot * 2 + 1  # energies + frequencies + error
@@ -31,10 +36,165 @@ def plot_emd_features(data, fs, imfs, n_imfs, features=None, title="EMD Features
                 ax.set_xlabel('Time (s)')
                 ax.set_ylabel('Amplitude')
                 ax.grid(True)
+                # Annotate with stats if provided
+                if stats is not None and len(stats) > comp_idx and i < len(stats[comp_idx]['mean']):
+                    stat_text = (
+                        f"mean={stats[comp_idx]['mean'][i]:.2g}\n"
+                        f"std={stats[comp_idx]['std'][i]:.2g}\n"
+                        f"skew={stats[comp_idx]['skewness'][i]:.2g}\n"
+                        f"kurt={stats[comp_idx]['kurtosis'][i]:.2g}\n"
+                        f"zcross={int(stats[comp_idx]['zero_crossings'][i])}\n"
+                        f"ptp={stats[comp_idx]['peak_to_peak'][i]:.2g}\n"
+                        f"centroid={stats[comp_idx]['spectral_centroid'][i]:.2g}\n"
+                        f"bandwidth={stats[comp_idx]['spectral_bandwidth'][i]:.2g}\n"
+                        f"entropy={stats[comp_idx]['spectral_entropy'][i]:.2g}\n"
+                        f"flatness={stats[comp_idx]['spectral_flatness'][i]:.2g}\n"
+                        f"fm_index={stats[comp_idx]['freq_modulation_index'][i]:.2g}\n"
+
+                    )
+                    ax.text(0.98, 0.98, stat_text, transform=ax.transAxes,
+                            fontsize=8, va='top', ha='right',
+                            bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
     plt.tight_layout()
     plt.show()
     plt.savefig(f"emd_features_{title}.png")
     return fig
+    
+    
+def imf_freq_domain_stats(imfs, fs=100):
+    """
+    imfs: np.ndarray of shape (n_imfs, n_samples)
+    fs: sampling frequency
+    Returns: dict of lists, one per frequency metric
+    """
+    eps = np.finfo(float).eps
+    stats = {
+        'spectral_centroid': [],
+        'spectral_bandwidth': [],
+        'spectral_entropy': [],
+        'spectral_flatness': [],
+        'freq_modulation_index': []
+    }
+
+    for imf in imfs:
+        N = len(imf)
+        # FFT power spectrum
+        freqs = np.fft.rfftfreq(N, d=1/fs)
+        P = np.abs(np.fft.rfft(imf))**2
+        P_sum = P.sum() + eps
+        P_norm = P / P_sum
+
+        # Spectral centroid
+        centroid = np.sum(freqs * P_norm)
+
+        # Spectral bandwidth
+        bandwidth = np.sqrt(np.sum(((freqs - centroid)**2) * P_norm))
+
+        # Spectral entropy
+        entropy = -np.sum(P_norm * np.log(P_norm + eps))
+
+        # Spectral flatness (geometric mean / arithmetic mean)
+        geo_mean = np.exp(np.mean(np.log(P + eps)))
+        arith_mean = np.mean(P + eps)
+        flatness = geo_mean / arith_mean
+
+        # Instantaneous frequency via Hilbert transform
+        analytic_sig = hilbert(imf)
+        inst_phase = np.unwrap(np.angle(analytic_sig))
+        inst_freq = np.diff(inst_phase) * fs / (2 * np.pi)
+        # avoid division by zero
+        if np.mean(inst_freq) != 0:
+            fm_index = np.std(inst_freq) / np.mean(inst_freq)
+        else:
+            fm_index = 0.0
+
+        # append
+        stats['spectral_centroid'].append(centroid)
+        stats['spectral_bandwidth'].append(bandwidth)
+        stats['spectral_entropy'].append(entropy)
+        stats['spectral_flatness'].append(flatness)
+        stats['freq_modulation_index'].append(fm_index)
+
+    return stats
+    
+    
+def imf_freq_domain_stats(imfs, fs=100):
+    """
+    imfs: np.ndarray of shape (n_imfs, n_samples)
+    fs: sampling frequency
+    Returns: dict of lists, one per frequency metric
+    """
+    eps = np.finfo(float).eps
+    stats = {
+        'spectral_centroid': [],
+        'spectral_bandwidth': [],
+        'spectral_entropy': [],
+        'spectral_flatness': [],
+        'freq_modulation_index': []
+    }
+
+    for imf in imfs:
+        N = len(imf)
+        # FFT power spectrum
+        freqs = np.fft.rfftfreq(N, d=1/fs)
+        P = np.abs(np.fft.rfft(imf))**2
+        P_sum = P.sum() + eps
+        P_norm = P / P_sum
+
+        # Spectral centroid
+        centroid = np.sum(freqs * P_norm)
+
+        # Spectral bandwidth
+        bandwidth = np.sqrt(np.sum(((freqs - centroid)**2) * P_norm))
+
+        # Spectral entropy
+        entropy = -np.sum(P_norm * np.log(P_norm + eps))
+
+        # Spectral flatness (geometric mean / arithmetic mean)
+        geo_mean = np.exp(np.mean(np.log(P + eps)))
+        arith_mean = np.mean(P + eps)
+        flatness = geo_mean / arith_mean
+
+        # Instantaneous frequency via Hilbert transform
+        analytic_sig = hilbert(imf)
+        inst_phase = np.unwrap(np.angle(analytic_sig))
+        inst_freq = np.diff(inst_phase) * fs / (2 * np.pi)
+        # avoid division by zero
+        if np.mean(inst_freq) != 0:
+            fm_index = np.std(inst_freq) / np.mean(inst_freq)
+        else:
+            fm_index = 0.0
+
+        # append
+        stats['spectral_centroid'].append(centroid)
+        stats['spectral_bandwidth'].append(bandwidth)
+        stats['spectral_entropy'].append(entropy)
+        stats['spectral_flatness'].append(flatness)
+        stats['freq_modulation_index'].append(fm_index)
+
+    return stats
+
+def imf_time_domain_stats(imfs):
+    """
+    imfs: np.ndarray of shape (n_imfs, n_samples)
+    Returns: dict of lists, one per statistic
+    """
+    stats = {
+        'mean': [],
+        'std': [],
+        'skewness': [],
+        'kurtosis': [],
+        'zero_crossings': [],
+        'peak_to_peak': []
+    }
+    for imf in imfs:
+        stats['mean'].append(np.mean(imf))
+        stats['std'].append(np.std(imf))
+        stats['skewness'].append(skew(imf))
+        stats['kurtosis'].append(kurtosis(imf))
+        stats['zero_crossings'].append(np.sum(np.diff(np.sign(imf)) != 0))
+        stats['peak_to_peak'].append(np.ptp(imf))
+    return stats
 
 def decompose_and_save_emd(
     file_name_hdf5, 
@@ -76,20 +236,33 @@ def decompose_and_save_emd(
                     noise_data[trace_name] = (data, fs)
                 # EMD decomposition for each component
                 imfs = []
+                imf_stats = []
                 for comp_idx in range(data.shape[1]):
                     emd = EMD()
                     imfs_comp = emd.emd(data[:, comp_idx])
                     imfs.append(imfs_comp)
-                plot_emd_features(data, fs, imfs, n_imfs=10, title=f"EMD_Decomposition_{trace_name}")
+                    # Calculate stats for this component's IMFs
+                    stats = imf_time_domain_stats(imfs_comp)
+                    # print(f"Stats for component {comp_idx} of trace, {trace_name} : {stats}")
+                    
+                    stats_fd = imf_freq_domain_stats(imfs_comp)
+                    stats.update(stats_fd)
+                    imf_stats.append(stats)
+
+                    
+                plot_emd_features(data, fs, imfs, n_imfs=10, title=f"EMD_Decomposition_{trace_name}", stats=imf_stats)
                 # Save decomposition results
                 trace_group = f_out.create_group(trace_name)
                 trace_group.attrs['sampling_rate'] = fs
                 trace_group.attrs['magnitude'] = mag
                 trace_group.attrs['category'] = trace_category
                 trace_group.create_dataset('original_data', data=data)
-                for comp_idx, (comp_name, imf_data) in enumerate(zip(components, imfs)):
+                for comp_idx, (comp_name, imf_data, stats) in enumerate(zip(components, imfs, imf_stats)):
                     comp_group = trace_group.create_group(f'component_{comp_name}')
                     comp_group.create_dataset('imfs', data=imf_data)
+                    # Save stats as attributes (as JSON string for easy reading)
+                    for stat_name, stat_list in stats.items():
+                        comp_group.attrs[stat_name] = np.array(stat_list)
                 print(f"Saved decomposition for trace: {trace_name}")
         print(f"All decompositions saved to: {output_file}")
         # Optionally plot random traces
@@ -109,7 +282,8 @@ def decompose_and_save_emd(
                               trace_group.attrs['sampling_rate'], 
                               imfs, 
                               n_imfs=10, 
-                              title=f"EMD_test_Decomposition-{trace_name}")
+                              title=f"EMD_test_Decomposition-{trace_name}",
+                              stats=imf_stats)
 
 # --- Configuration for earthquake and noise data ---
 file_name_merged = r"/users/230442014/archive/STEAD_dataset/chunk2.hdf5"
