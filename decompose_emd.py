@@ -9,6 +9,8 @@ from scipy.stats import skew, kurtosis
 import numpy as np
 from scipy.signal import hilbert
 import math
+import matplotlib.patches as mpatches
+
 
 
 def plot_emd_features(data, fs, imfs, n_imfs, title="EMD Features", stats=None):
@@ -384,6 +386,22 @@ def decompose_and_save_emd(
                       # Otherwise (single number, string, etc.) keep it as an attribute
                       else:
                           comp_group.attrs[stat_name] = stat_val
+                          
+                # --- NEW: collect into global_records ---
+                for comp_idx, stats in enumerate(imf_stats):
+                    comp = components[comp_idx]
+                    for metric in metrics:
+                        values = stats[metric]
+                        for imf_idx, val in enumerate(values, start=1):
+                            global_records.append({
+                                'trace': trace_name,
+                                'component': comp,
+                                'imf': imf_idx,
+                                'metric': metric,
+                                'value': val,
+                                'category': trace_category
+                            })
+                            
                 print(f"Saved decomposition for trace: {trace_name}")
         print(f"All decompositions saved to: {output_file}")
         # Optionally plot random traces
@@ -418,12 +436,25 @@ output_file_noise = 'emd_decompositions_chunk1.h5'
 # Ensure model directory exists
 os.makedirs("saved_models", exist_ok=True)
 
+
+# this will accumulate every (trace,component,imf,metric,value)
+global_records = []
+
+# define the exact metrics you want to summarize
+metrics = [
+    'mean', 'std', 'skewness', 'kurtosis',
+    'zero_crossings', 'peak_to_peak',
+    'spectral_centroid', 'spectral_bandwidth',
+    'spectral_entropy', 'spectral_flatness',
+    'freq_modulation_index'
+]
+
 # Run for earthquake data
 decompose_and_save_emd(
     file_name_hdf5=file_name_merged,
     csv_file=csv_file_merged,
     output_file=output_file_merged,
-    n_samples=3
+    n_samples=1
 )
 
 # Run for noise data
@@ -431,10 +462,69 @@ decompose_and_save_emd(
     file_name_hdf5=file_name_noise,
     csv_file=csv_file_noise,
     output_file=output_file_noise,
-    n_samples=3
+    n_samples=1
 )
 
+# =============================================================================
+# 5) Build DataFrame & grouped boxplots
+# =============================================================================
+df = pd.DataFrame(global_records)
+cats    = df.category.unique().tolist()
+colors = ['C0', 'C1']  # add more if you have more than two categories
 
+n_cats = len(cats)
+width  = 0.8 / n_cats
+offsets = np.linspace(-0.4 + width/2, 0.4 - width/2, n_cats)
 
+for metric in metrics:
+    sub = df[df.metric == metric]
+    imfs = sorted(sub.imf.unique())
+    base = np.arange(1, len(imfs) + 1)
+
+    fig, ax = plt.subplots(figsize=(8,4))
+
+    for idx, (cat, off) in enumerate(zip(cats, offsets)):
+        # collect each IMF's values for this category
+        data = [ sub[(sub.imf==k) & (sub.category==cat)].value.values
+                 for k in imfs ]
+
+        # draw the boxplot for this category, shifted by `off`
+        bp = ax.boxplot(
+            data,
+            positions=base + off,
+            widths=width,
+            patch_artist=True,    # so we can color the boxes
+            showfliers=False,
+            notch=False
+        )
+
+        # color them
+        for box in bp['boxes']:
+            box.set(facecolor=colors[idx], edgecolor='black', linewidth=1)
+        for whisker in bp['whiskers']:
+            whisker.set(color='black', linewidth=1)
+        for cap in bp['caps']:
+            cap.set(color='black', linewidth=1)
+        for median in bp['medians']:
+            median.set(color='black', linewidth=0.5)
+
+    # finish formatting
+    ax.set_xticks(base)
+    ax.set_xticklabels(imfs)
+    ax.set_xlabel('IMF #')
+    ax.set_ylabel(metric)
+    ax.set_title(f'Boxplot of {metric} (EQ vs Noise)')
+    ax.grid(alpha=0.3)
+
+    # build a proper legend with colored patches
+    legend_handles = [
+        mpatches.Patch(facecolor=colors[i], edgecolor='black', label=cats[i])
+        for i in range(n_cats)
+    ]
+    ax.legend(handles=legend_handles, loc='upper right')
+
+    plt.tight_layout()
+    plt.savefig(f'boxplot_{metric}.png', dpi=150)
+    plt.show()
 
 
