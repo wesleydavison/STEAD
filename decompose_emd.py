@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import numpy as np
 import pandas as pd
 import h5py
@@ -7,116 +8,222 @@ import matplotlib.pyplot as plt
 from scipy.stats import skew, kurtosis
 import numpy as np
 from scipy.signal import hilbert
+import math
 
 
-
-def plot_emd_features(data, fs, imfs, n_imfs, features=None, title="EMD Features", stats=None):
-    """Plot EMD features for a single trace"""
+def plot_emd_features(data, fs, imfs, n_imfs, title="EMD Features", stats=None):
+    ###
+    #Draw original 3-component trace, energy-ratio bars, chosen IMFs with
+    #stats, correlation-matrix heat-map and mode-mixing-index stem plot.
+    #------------------------------------------------------------------
+    # `imfs`  – list [imfs_E, imfs_N, imfs_Z] with shape
+    #            (n_imfs_comp, n_samples) for each component.
+    # `stats` – list of 3 dicts (one per component) produced in
+    #            decompose_and_save_emd.  Must contain keys:
+    #            mean, std, ..., energy_ratio, corr_matrix, mode_mixing.
+    #
+    # How many IMFs do we actually have to show?
     n_imfs_to_plot = min(n_imfs, max(imf.shape[0] for imf in imfs))
-    n_features_per_comp = n_imfs_to_plot * 2 + 1  # energies + frequencies + error
-    fig = plt.figure(figsize=(15, 4*(n_imfs_to_plot + 2)))
-    gs = fig.add_gridspec(n_imfs_to_plot + 2, 3)
-    fig.suptitle(title)
+
+    # Rows: 0  = original trace
+    #       1  = energy ratio
+    #    2..(1+N)  = IMFs
+    #   N+2        = correlation matrix
+    #   N+3        = mode-mixing index
+    rows = n_imfs_to_plot + 4
+    fig  = plt.figure(figsize=(15, 4 * rows))
+    gs   = fig.add_gridspec(rows, 3, hspace=0.6)
+    fig.suptitle(title, fontsize=16, y=0.99)
+
     t = np.arange(len(data)) / fs
     components = ['e', 'n', 'z']
+
     for comp_idx, comp in enumerate(components):
-        # Original signal
-        ax = fig.add_subplot(gs[0, comp_idx])
-        ax.plot(t, data[:, comp_idx], 'k', lw=0.5)
-        ax.set_title(f'{comp} Component')
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Amplitude')
-        ax.grid(True)
-        # IMFs
+        # ----------- row 0: original component -----------
+        ax0 = fig.add_subplot(gs[0, comp_idx])
+        ax0.plot(t, data[:, comp_idx], 'k', lw=0.5)
+        ax0.set_title(f'{comp.upper()} component')
+        ax0.set_xlabel('Time (s)'); ax0.set_ylabel('Amplitude'); ax0.grid(True)
+
+        # ----------- row 1: energy-ratio bars -----------
+        if stats is not None:
+            er = stats[comp_idx]['energy_ratio']
+            ax_er = fig.add_subplot(gs[1, comp_idx])
+            ax_er.bar(np.arange(len(er)) + 1, er, color='slategray')
+            ax_er.set_title('Energy ratio')
+            ax_er.set_xlabel('IMF #'); ax_er.set_ylabel('Fraction')
+            ax_er.set_ylim(0, 1.05)
+
+        # ----------- rows 2 … N: IMFs -----------
         for i in range(n_imfs_to_plot):
-            if i < imfs[comp_idx].shape[0]:
-                ax = fig.add_subplot(gs[i+1, comp_idx])
-                ax.plot(t, imfs[comp_idx][i], 'b', lw=0.5)
-                ax.set_title(f'IMF {i+1}')
-                ax.set_xlabel('Time (s)')
-                ax.set_ylabel('Amplitude')
-                ax.grid(True)
-                # Annotate with stats if provided
-                if stats is not None and len(stats) > comp_idx and i < len(stats[comp_idx]['mean']):
-                    stat_text = (
-                        f"mean={stats[comp_idx]['mean'][i]:.2g}\n"
-                        f"std={stats[comp_idx]['std'][i]:.2g}\n"
-                        f"skew={stats[comp_idx]['skewness'][i]:.2g}\n"
-                        f"kurt={stats[comp_idx]['kurtosis'][i]:.2g}\n"
-                        f"zcross={int(stats[comp_idx]['zero_crossings'][i])}\n"
-                        f"ptp={stats[comp_idx]['peak_to_peak'][i]:.2g}\n"
-                        f"centroid={stats[comp_idx]['spectral_centroid'][i]:.2g}\n"
-                        f"bandwidth={stats[comp_idx]['spectral_bandwidth'][i]:.2g}\n"
-                        f"entropy={stats[comp_idx]['spectral_entropy'][i]:.2g}\n"
-                        f"flatness={stats[comp_idx]['spectral_flatness'][i]:.2g}\n"
-                        f"fm_index={stats[comp_idx]['freq_modulation_index'][i]:.2g}\n"
+            if i >= imfs[comp_idx].shape[0]:
+                continue
+            ax = fig.add_subplot(gs[i + 2, comp_idx])
+            ax.plot(t, imfs[comp_idx][i], 'b', lw=0.5)
+            ax.set_title(f'IMF {i + 1}')
+            ax.set_xlabel('Time (s)'); ax.set_ylabel('Amplitude'); ax.grid(True)
 
-                    )
-                    ax.text(0.98, 0.98, stat_text, transform=ax.transAxes,
-                            fontsize=8, va='top', ha='right',
-                            bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+            # ----- per-IMF stat overlay -----
+            if stats is not None and i < len(stats[comp_idx]['mean']):
+                st = stats[comp_idx]  # shorthand
+                stat_text = (
+                    f"mean={st['mean'][i]:.2g}\n"
+                    f"std={st['std'][i]:.2g}\n"
+                    f"skew={st['skewness'][i]:.2g}\n"
+                    f"kurt={st['kurtosis'][i]:.2g}\n"
+                    f"zcross={int(st['zero_crossings'][i])}\n"
+                    f"ptp={st['peak_to_peak'][i]:.2g}\n"
+                    f"centroid={st['spectral_centroid'][i]:.2g}\n"
+                    f"bw={st['spectral_bandwidth'][i]:.2g}\n"
+                    f"entropy={st['spectral_entropy'][i]:.2g}\n"
+                    f"flatness={st['spectral_flatness'][i]:.2g}\n"
+                    f"fm_idx={st['freq_modulation_index'][i]:.2g}"
+                )
+                ax.text(0.98, 0.98, stat_text, transform=ax.transAxes,
+                        fontsize=7, va='top', ha='right',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+
+        # ----------- row N+1: correlation heat-map -----------
+        if stats is not None:
+            ax_cm = fig.add_subplot(gs[n_imfs_to_plot + 2, comp_idx])
+            cmat  = stats[comp_idx]['corr_matrix']
+            im    = ax_cm.imshow(cmat, vmin=-1, vmax=1,
+                                 cmap='seismic', aspect='auto')
+            ax_cm.set_title('IMF correlation')
+            ax_cm.set_xlabel('IMF'); ax_cm.set_ylabel('IMF')
+            fig.colorbar(im, ax=ax_cm, shrink=0.7)
+
+        # ----------- row N+2: mode-mixing index -----------
+        if stats is not None:
+            mmi  = stats[comp_idx]['mode_mixing']
+            ax_m = fig.add_subplot(gs[n_imfs_to_plot + 3, comp_idx])
+            ax_m.stem(np.arange(1, len(mmi) + 1), mmi, basefmt=' ')
+            ax_m.set_title('Mode-mixing index')
+            ax_m.set_xlabel('Between IMF i & i+1'); ax_m.set_ylabel('MMI')
+            ax_m.set_ylim(0, 1.05)
+
     plt.tight_layout()
+    plt.savefig(f"emd_features_{title}.png", dpi=150)
     plt.show()
-    plt.savefig(f"emd_features_{title}.png")
     return fig
-    
-    
-def imf_freq_domain_stats(imfs, fs=100):
+
+
+# -------------------------  NON-LINEAR IMF METRICS  --------------------------
+
+
+# -- 1.a  Fractal dimension  (Higuchi’s method – robust for short 1-D data) --
+def higuchi_fd(x, kmax=10):
     """
-    imfs: np.ndarray of shape (n_imfs, n_samples)
-    fs: sampling frequency
-    Returns: dict of lists, one per frequency metric
+    Higuchi fractal dimension of 1-D signal x.
+    kmax controls scale. 8-10 is typical for a few-hundred-sample IMF.
     """
-    eps = np.finfo(float).eps
+    N = len(x)
+    L = []
+    k_vals = range(1, kmax + 1)
+    for k in k_vals:
+        Lk = []
+        for m in range(k):
+            idx = np.arange(m, N, k)
+            if len(idx) < 2:      # nothing to measure
+                continue
+            dist = np.abs(np.diff(x[idx])).sum()
+            norm = (N - 1) / (len(idx) * k)
+            Lk.append(dist * norm)
+        L.append(np.mean(Lk))
+    # Linear fit in log–log domain
+    logL = np.log(L)
+    logk = np.log(1. / np.array(list(k_vals)))
+    # slope = –D  ?  FD = –slope
+    coeffs = np.polyfit(logk, logL, 1)
+    return -coeffs[0]
+
+
+# -- 1.b  Sample entropy  (m=2, r=0.2·std is common in literature) -----------
+def sampen(x, m=2, r_ratio=0.2):
+    """
+    Sample entropy (Richman & Moorman).  Returns np.nan if signal too short.
+    """
+    N = len(x)
+    if N <= m + 1:
+        return np.nan
+    r = r_ratio * np.std(x)
+    def _phi(order):
+        count = 0
+        for i in range(N - order):
+            template = x[i:i+order]
+            for j in range(i+1, N - order):
+                if np.all(np.abs(template - x[j:j+order]) <= r):
+                    count += 1
+        return count
+    B = _phi(m)
+    A = _phi(m + 1)
+    if B == 0:
+        return np.inf
+    return -np.log(A / B) if A else np.inf
+
+
+# -- 1.c  Teager–Kaiser energy operator statistics ---------------------------
+def tkeo_mean_var(x):
+    """
+    Returns mean and variance of the discrete Teager-Kaiser operator
+    """
+    if len(x) < 3:
+        return (np.nan, np.nan)
+    psi = x[1:-1]**2 - x[:-2] * x[2:]
+    return np.mean(psi), np.var(psi)
+
+    
+def imf_nonlinear_stats(imfs):
+    """
+    Returns dict with lists of nonlinear features for each IMF.
+    """
     stats = {
-        'spectral_centroid': [],
-        'spectral_bandwidth': [],
-        'spectral_entropy': [],
-        'spectral_flatness': [],
-        'freq_modulation_index': []
+        'fractal_dim': [],
+        'sample_entropy': [],
+        'tkeo_mean': [],
+        'tkeo_var': []
     }
-
     for imf in imfs:
-        N = len(imf)
-        # FFT power spectrum
-        freqs = np.fft.rfftfreq(N, d=1/fs)
-        P = np.abs(np.fft.rfft(imf))**2
-        P_sum = P.sum() + eps
-        P_norm = P / P_sum
-
-        # Spectral centroid
-        centroid = np.sum(freqs * P_norm)
-
-        # Spectral bandwidth
-        bandwidth = np.sqrt(np.sum(((freqs - centroid)**2) * P_norm))
-
-        # Spectral entropy
-        entropy = -np.sum(P_norm * np.log(P_norm + eps))
-
-        # Spectral flatness (geometric mean / arithmetic mean)
-        geo_mean = np.exp(np.mean(np.log(P + eps)))
-        arith_mean = np.mean(P + eps)
-        flatness = geo_mean / arith_mean
-
-        # Instantaneous frequency via Hilbert transform
-        analytic_sig = hilbert(imf)
-        inst_phase = np.unwrap(np.angle(analytic_sig))
-        inst_freq = np.diff(inst_phase) * fs / (2 * np.pi)
-        # avoid division by zero
-        if np.mean(inst_freq) != 0:
-            fm_index = np.std(inst_freq) / np.mean(inst_freq)
-        else:
-            fm_index = 0.0
-
-        # append
-        stats['spectral_centroid'].append(centroid)
-        stats['spectral_bandwidth'].append(bandwidth)
-        stats['spectral_entropy'].append(entropy)
-        stats['spectral_flatness'].append(flatness)
-        stats['freq_modulation_index'].append(fm_index)
-
+        stats['fractal_dim'].append(higuchi_fd(imf))
+        stats['sample_entropy'].append(sampen(imf))
+        mu, var = tkeo_mean_var(imf)
+        stats['tkeo_mean'].append(mu)
+        stats['tkeo_var'].append(var)
     return stats
     
+    
+# -------------------------  CROSS-IMF METRICS  ------------------------------
+def imf_energy_ratio(imfs):
+    """
+    Return vector r_k = E_k / SE of shape (n_imfs,).
+    """
+    energies = np.sum(imfs**2, axis=1)          # energy per IMF
+    tot = energies.sum()
+    return energies / tot if tot else energies * np.nan
+
+
+def imf_corr_matrix(imfs):
+    """
+    Pearson correlation matrix of shape (n_imfs, n_imfs).
+    """
+    return np.corrcoef(imfs)
+
+
+def imf_mode_mixing_index(imfs, fs):
+    """
+    Returns array of length n_imfs-1 with MMI between successive IMFs.
+    """
+    mmi = []
+    for i in range(len(imfs) - 1):
+        # power spectra
+        P_i = np.abs(np.fft.rfft(imfs[i]))**2
+        P_j = np.abs(np.fft.rfft(imfs[i + 1]))**2
+        # make sure arrays have same length (they will)
+        overlap = np.minimum(P_i, P_j).sum()
+        mmi.append((2 * overlap) / (P_i.sum() + P_j.sum()))
+    return np.array(mmi)
+
+
     
 def imf_freq_domain_stats(imfs, fs=100):
     """
@@ -243,10 +350,19 @@ def decompose_and_save_emd(
                     imfs.append(imfs_comp)
                     # Calculate stats for this component's IMFs
                     stats = imf_time_domain_stats(imfs_comp)
-                    # print(f"Stats for component {comp_idx} of trace, {trace_name} : {stats}")
-                    
                     stats_fd = imf_freq_domain_stats(imfs_comp)
                     stats.update(stats_fd)
+                    # stats_nl = imf_nonlinear_stats(imfs_comp)
+                    # stats.update(stats_nl)
+                    
+                    # -------- new cross-IMF stats -------------
+                    xstats = {
+                        'energy_ratio': imf_energy_ratio(imfs_comp),             # 1-D
+                        'corr_matrix':  imf_corr_matrix(imfs_comp),              # 2-D
+                        'mode_mixing':  imf_mode_mixing_index(imfs_comp, fs)     # 1-D
+                    }
+                    stats.update(xstats) 
+                    
                     imf_stats.append(stats)
 
                     
@@ -261,8 +377,13 @@ def decompose_and_save_emd(
                     comp_group = trace_group.create_group(f'component_{comp_name}')
                     comp_group.create_dataset('imfs', data=imf_data)
                     # Save stats as attributes (as JSON string for easy reading)
-                    for stat_name, stat_list in stats.items():
-                        comp_group.attrs[stat_name] = np.array(stat_list)
+                    for stat_name, stat_val in stats.items():
+                      # If it’s a list or an ndarray (1-D or 2-D), store it as a dataset
+                      if isinstance(stat_val, (list, np.ndarray)):
+                          comp_group.create_dataset(stat_name, data=np.asarray(stat_val))
+                      # Otherwise (single number, string, etc.) keep it as an attribute
+                      else:
+                          comp_group.attrs[stat_name] = stat_val
                 print(f"Saved decomposition for trace: {trace_name}")
         print(f"All decompositions saved to: {output_file}")
         # Optionally plot random traces
