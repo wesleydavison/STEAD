@@ -10,6 +10,8 @@ import numpy as np
 from scipy.signal import hilbert
 import math
 import matplotlib.patches as mpatches
+from tqdm import tqdm
+
 
 
 
@@ -106,7 +108,8 @@ def plot_emd_features(data, fs, imfs, n_imfs, title="EMD Features", stats=None):
 
     plt.tight_layout()
     plt.savefig(f"emd_features_{title}.png", dpi=150)
-    plt.show()
+    #plt.show()
+    plt.close(fig)
     return fig
 
 
@@ -330,7 +333,7 @@ def decompose_and_save_emd(
         f_out.attrs['creation_date'] = np.string_(pd.Timestamp.now().isoformat())
         f_out.attrs['n_samples'] = n_samples
         with h5py.File(file_name_hdf5, 'r') as h5f:
-            for _, row in sampled_df.iterrows():
+            for _, row in tqdm(sampled_df.iterrows(), total=len(sampled_df), desc=f"Processing {os.path.basename(csv_file)}"):
                 trace_name = row['trace_name']
                 trace_category = row['trace_category']
                 mag = row.get('source_magnitude', 0)
@@ -404,12 +407,15 @@ def decompose_and_save_emd(
                             
                 print(f"Saved decomposition for trace: {trace_name}")
         print(f"All decompositions saved to: {output_file}")
+        
         # Optionally plot random traces
-        print("Checking if the file saved correctly...")
-        print(f"File contains the following groups: {list(f_out.keys())}")
-        for group in f_out.keys():
-            print(f"Group {group} contains the following datasets: {list(f_out[group].keys())}")
-        print("Choosing random traces to plot...")
+        
+        #print("Checking if the file saved correctly...")
+        #print(f"File contains the following groups: {list(f_out.keys())}")
+        #for group in f_out.keys():
+        #    print(f"Group {group} contains the following datasets: {list(f_out[group].keys())}")
+        #print("Choosing random traces to plot...")
+        
         random_trace_names = np.random.choice(list(f_out.keys()), size=min(plot_random_traces, len(f_out.keys())), replace=False)
         print(f"Plotting EMD decompositions for the following traces: {random_trace_names}")
         for trace_name in random_trace_names:
@@ -436,6 +442,9 @@ output_file_noise = 'emd_decompositions_chunk1.h5'
 # Ensure model directory exists
 os.makedirs("saved_models", exist_ok=True)
 
+n_random_traces = 2
+n_samples = 1000
+
 
 # this will accumulate every (trace,component,imf,metric,value)
 global_records = []
@@ -454,7 +463,8 @@ decompose_and_save_emd(
     file_name_hdf5=file_name_merged,
     csv_file=csv_file_merged,
     output_file=output_file_merged,
-    n_samples=1
+    n_samples=n_samples,
+    plot_random_traces=n_random_traces
 )
 
 # Run for noise data
@@ -462,7 +472,8 @@ decompose_and_save_emd(
     file_name_hdf5=file_name_noise,
     csv_file=csv_file_noise,
     output_file=output_file_noise,
-    n_samples=1
+    n_samples=n_samples,
+    plot_random_traces=n_random_traces
 )
 
 # =============================================================================
@@ -477,54 +488,65 @@ width  = 0.8 / n_cats
 offsets = np.linspace(-0.4 + width/2, 0.4 - width/2, n_cats)
 
 for metric in metrics:
-    sub = df[df.metric == metric]
+    sub  = df[df.metric == metric]
     imfs = sorted(sub.imf.unique())
     base = np.arange(1, len(imfs) + 1)
 
-    fig, ax = plt.subplots(figsize=(8,4))
+    # 1 row, 2 cols: left=linear y, right=log y
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=False)
+    panel_info = [
+        (axes[0], False, 'Linear scale'),
+        (axes[1], True,  'Log scale')
+    ]
 
-    for idx, (cat, off) in enumerate(zip(cats, offsets)):
-        # collect each IMF's values for this category
-        data = [ sub[(sub.imf==k) & (sub.category==cat)].value.values
-                 for k in imfs ]
+    for ax, use_log, suffix in panel_info:
+        # draw each category side-by-side
+        for idx, (cat, off) in enumerate(zip(cats, offsets)):
+            data = [
+                sub[(sub.imf==k) & (sub.category==cat)].value.values
+                for k in imfs
+            ]
+            bp = ax.boxplot(
+                data,
+                positions=base + off,
+                widths=width,
+                patch_artist=True,
+                showfliers=False,
+                notch=False
+            )
+            # style boxes/whiskers/caps/medians
+            for box in bp['boxes']:
+                box.set(facecolor=colors[idx], edgecolor='black', linewidth=1)
+            for w in bp['whiskers']:
+                w.set(color='black', linewidth=1)
+            for c in bp['caps']:
+                c.set(color='black', linewidth=1)
+            for m in bp['medians']:
+                m.set(color='black', linewidth=0.5)
 
-        # draw the boxplot for this category, shifted by `off`
-        bp = ax.boxplot(
-            data,
-            positions=base + off,
-            widths=width,
-            patch_artist=True,    # so we can color the boxes
-            showfliers=False,
-            notch=False
-        )
+        ax.set_xticks(base)
+        ax.set_xticklabels(imfs)
+        ax.set_xlabel('IMF #')
+        ax.set_ylabel(metric)
+        ax.set_title(f'{metric} ({suffix})')
+        ax.grid(alpha=0.3)
 
-        # color them
-        for box in bp['boxes']:
-            box.set(facecolor=colors[idx], edgecolor='black', linewidth=1)
-        for whisker in bp['whiskers']:
-            whisker.set(color='black', linewidth=1)
-        for cap in bp['caps']:
-            cap.set(color='black', linewidth=1)
-        for median in bp['medians']:
-            median.set(color='black', linewidth=0.5)
+        if use_log:
+            ax.set_yscale('log')
+            # avoid zero or negative values if any:
+            ax.set_ylim(bottom=max(sub.value.min(), 1e-3))
 
-    # finish formatting
-    ax.set_xticks(base)
-    ax.set_xticklabels(imfs)
-    ax.set_xlabel('IMF #')
-    ax.set_ylabel(metric)
-    ax.set_title(f'Boxplot of {metric} (EQ vs Noise)')
-    ax.grid(alpha=0.3)
-
-    # build a proper legend with colored patches
-    legend_handles = [
-        mpatches.Patch(facecolor=colors[i], edgecolor='black', label=cats[i])
+    # add legend to the left panel
+    handles = [
+        mpatches.Patch(facecolor=colors[i],
+                       edgecolor='black',
+                       label=cats[i])
         for i in range(n_cats)
     ]
-    ax.legend(handles=legend_handles, loc='upper right')
+    axes[0].legend(handles=handles, loc='upper right')
 
     plt.tight_layout()
-    plt.savefig(f'boxplot_{metric}.png', dpi=150)
-    plt.show()
+    plt.savefig(f'boxplot_{metric}_linear_vs_log.png', dpi=150)
+    plt.close(fig)
 
 
