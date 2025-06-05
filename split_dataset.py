@@ -68,13 +68,14 @@ def validate_splits(df_orig, splits, file_name, output_dir):
         plt.figure(figsize=(10, 6))
         data = [df_orig[column].dropna()] + [split[column].dropna() for split in splits]
         labels = ['Original'] + [f'Split {i+1}' for i in range(len(splits))]
-        plt.boxplot(data, labels=labels)
+        plt.boxplot(data, tick_labels=labels)
         title = f'Boxplot of {column}'
         plt.title(title)
         plt.ylabel(column)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         boxplot_path = os.path.join(output_dir, f'{file_name}_{column}_boxplot.png')
+        os.makedirs(output_dir, exist_ok=True)
         plt.savefig(boxplot_path)
         plt.close()
 
@@ -92,7 +93,162 @@ def plot_seismograms_per_year(df, file_name, output_dir):
     plt.xticks(rotation=45)
     plt.tight_layout()
     yearly_plot_path = os.path.join(output_dir, f'{file_name}_yearly_distribution.png')
+    os.makedirs(output_dir, exist_ok=True)
     plt.savefig(yearly_plot_path)
+    plt.close()
+
+
+def plot_epicentral_distance_pie(df, file_name, output_dir):
+    """Plot a pie chart of epicentral distances for earthquake_local events."""
+    eq_df = df[df['trace_category'] == 'earthquake_local']
+    bins = [0, 5, 10, 20, 40, 80, 110, 350]
+    labels = ['0-5 km', '5-10 km', '10-20 km', '20-40 km', '40-80 km', '80-110 km', '110-350 km']
+    categories = pd.cut(eq_df['source_distance_km'], bins=bins, labels=labels, right=False)
+    counts = categories.value_counts(sort=False)
+    plt.figure(figsize=(6, 6))
+    wedges, texts, autotexts = plt.pie(
+        counts, labels=labels, autopct='%1.0f %%', startangle=90,
+        colors=plt.cm.winter(np.linspace(0, 1, len(labels)))
+    )
+    plt.title('Epicentral Distances', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    pie_path = os.path.join(output_dir, f'{file_name}_epicentral_distance_pie.png')
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(pie_path)
+    plt.close()
+
+
+def plot_depth_distribution(df, file_name, output_dir):
+    """Plot the distribution of earthquake depths (log frequency vs. depth in km)."""
+    eq_df = df[df['trace_category'] == 'earthquake_local']
+    depths = eq_df['source_depth_km'].dropna()
+    plt.figure(figsize=(10, 6))
+    plt.hist(depths, bins=35, color='cornflowerblue', alpha=0.7)
+    plt.yscale('log')
+    plt.xlabel('Depth km')
+    plt.ylabel('Log Frequency')
+    plt.title('Distribution of earthquake depths')
+    plt.tight_layout()
+    depth_plot_path = os.path.join(output_dir, f'{file_name}_depth_distribution.png')
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(depth_plot_path)
+    plt.close()
+
+
+def plot_magnitude_distribution(df, file_name, output_dir):
+    """Plot the distribution of earthquake magnitudes (log frequency vs. magnitude)."""
+    eq_df = df[df['trace_category'] == 'earthquake_local']
+    mags = eq_df['source_magnitude'].dropna()
+    plt.figure(figsize=(10, 6))
+    n, bins, patches = plt.hist(mags, bins=35, color='mediumpurple', alpha=0.7)
+    plt.yscale('log')
+    plt.xlabel('Magnitude')
+    plt.ylabel('Log Frequency')
+    plt.title('Distribution of earthquake magnitudes')
+    if len(mags) > 0:
+        max_mag = mags.max()
+        min_mag = mags.min()
+        plt.text(0.98, 0.98, f"Max: {max_mag:.2f} M\nMin: {min_mag:.2f} M", 
+                 ha='right', va='top', transform=plt.gca().transAxes,
+                 fontsize=12, bbox=dict(facecolor='lavender', alpha=0.7, edgecolor='none'))
+    plt.tight_layout()
+    mag_plot_path = os.path.join(output_dir, f'{file_name}_magnitude_distribution.png')
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(mag_plot_path)
+    plt.close()
+
+
+def plot_all_depth_distributions(dfs, names, output_dir, base):
+    """Plot all depth distributions as subplots in a single figure."""
+    n = len(dfs)
+    fig, axes = plt.subplots(1, n, figsize=(6*n, 5))
+    if n == 1:
+        axes = [axes]
+    for i, (df, name) in enumerate(zip(dfs, names)):
+        eq_df = df[df['trace_category'] == 'earthquake_local']
+        depths = eq_df['source_depth_km'].dropna()
+        axes[i].hist(depths, bins=35, color='cornflowerblue', alpha=0.7)
+        axes[i].set_yscale('log')
+        axes[i].set_xlabel('Depth km')
+        if i == 0:
+            axes[i].set_ylabel('Log Frequency')
+        axes[i].set_title(name)
+    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(os.path.join(output_dir, f'{base}_all_depth_distributions.png'))
+    plt.close()
+
+
+def plot_all_seismograms_per_year(dfs, names, output_dir, base):
+    """Plot all seismograms per year as subplots in a single figure."""
+    n = len(dfs)
+    fig, axes = plt.subplots(1, n, figsize=(6*n, 5))
+    if n == 1:
+        axes = [axes]
+    for i, (df, name) in enumerate(zip(dfs, names)):
+        df = df.copy()
+        df['year'] = pd.to_datetime(df['source_origin_time']).dt.year
+        yearly_counts = df['year'].value_counts().sort_index()
+        axes[i].bar(yearly_counts.index, yearly_counts.values, color=sns.color_palette("colorblind")[0])
+        axes[i].set_title(name)
+        axes[i].set_xlabel('Year')
+        if i == 0:
+            axes[i].set_ylabel('Number of Seismograms')
+        axes[i].tick_params(axis='x', rotation=45)
+    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(os.path.join(output_dir, f'{base}_all_seismograms_per_year.png'))
+    plt.close()
+
+
+def plot_all_epicentral_distance_pies(dfs, names, output_dir, base):
+    """Plot all epicentral distance pies as subplots in a single figure."""
+    bins = [0, 5, 10, 20, 40, 80, 110, 350]
+    labels = ['0-5 km', '5-10 km', '10-20 km', '20-40 km', '40-80 km', '80-110 km', '110-350 km']
+    n = len(dfs)
+    fig, axes = plt.subplots(1, n, figsize=(6*n, 6))
+    if n == 1:
+        axes = [axes]
+    for i, (df, name) in enumerate(zip(dfs, names)):
+        eq_df = df[df['trace_category'] == 'earthquake_local']
+        categories = pd.cut(eq_df['source_distance_km'], bins=bins, labels=labels, right=False)
+        counts = categories.value_counts(sort=False)
+        axes[i].pie(
+            counts, labels=labels, autopct='%1.0f %%', startangle=90,
+            colors=plt.cm.winter(np.linspace(0, 1, len(labels)))
+        )
+        axes[i].set_title(name)
+    plt.suptitle('Epicentral Distances', fontsize=16, fontweight='bold')
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(os.path.join(output_dir, f'{base}_all_epicentral_distance_pies.png'))
+    plt.close()
+
+
+def plot_all_magnitude_distributions(dfs, names, output_dir, base):
+    """Plot all magnitude distributions as subplots in a single figure."""
+    n = len(dfs)
+    fig, axes = plt.subplots(1, n, figsize=(6*n, 5))
+    if n == 1:
+        axes = [axes]
+    for i, (df, name) in enumerate(zip(dfs, names)):
+        eq_df = df[df['trace_category'] == 'earthquake_local']
+        mags = eq_df['source_magnitude'].dropna()
+        axes[i].hist(mags, bins=35, color='mediumpurple', alpha=0.7)
+        axes[i].set_yscale('log')
+        axes[i].set_xlabel('Magnitude')
+        if i == 0:
+            axes[i].set_ylabel('Log Frequency')
+        axes[i].set_title(name)
+        if len(mags) > 0:
+            max_mag = mags.max()
+            min_mag = mags.min()
+            axes[i].text(0.98, 0.98, f"Max: {max_mag:.2f} M\nMin: {min_mag:.2f} M", 
+                         ha='right', va='top', transform=axes[i].transAxes,
+                         fontsize=12, bbox=dict(facecolor='lavender', alpha=0.7, edgecolor='none'))
+    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(os.path.join(output_dir, f'{base}_all_magnitude_distributions.png'))
     plt.close()
 
 
@@ -149,10 +305,43 @@ def main():
 
         # Plot yearly seismogram distribution for the original dataset
         plot_seismograms_per_year(df_orig, f'{base}_original', output_dir)
+        
+        # Plot epicentral distance pie chart for the original dataset
+        plot_epicentral_distance_pie(df_orig, f'{base}_original', output_dir)
+
+        # Plot depth distribution for the original dataset
+        plot_depth_distribution(df_orig, f'{base}_original', output_dir)
+
+        # Plot magnitude distribution for the original dataset
+        plot_magnitude_distribution(df_orig, f'{base}_original', output_dir)
 
         # Plot yearly seismogram distribution for each split
         for i, split in enumerate(splits):
             plot_seismograms_per_year(split, f'{base}_split{i+1}', output_dir)
+            
+            plot_epicentral_distance_pie(split, f'{base}_split{i+1}', output_dir)
+
+            # Plot depth distribution for each split
+            plot_depth_distribution(split, f'{base}_split{i+1}', output_dir)
+
+            # Plot magnitude distribution for each split
+            plot_magnitude_distribution(split, f'{base}_split{i+1}', output_dir)
+
+        # Prepare list of all DataFrames and their names
+        all_dfs = [df_orig] + splits
+        all_names = [f'{base}_original'] + [f'{base}_split{i+1}' for i in range(len(splits))]
+
+        # Plot all seismograms per year in one figure
+        plot_all_seismograms_per_year(all_dfs, all_names, output_dir, base)
+
+        # Plot all epicentral distance pies in one figure
+        plot_all_epicentral_distance_pies(all_dfs, all_names, output_dir, base)
+
+        # Plot all depth distributions in one figure
+        plot_all_depth_distributions(all_dfs, all_names, output_dir, base)
+
+        # Plot all magnitude distributions in one figure
+        plot_all_magnitude_distributions(all_dfs, all_names, output_dir, base)
 
         # Prepare output file paths for each split
         outfiles = [
